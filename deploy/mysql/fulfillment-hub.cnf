@@ -1,0 +1,9 @@
+# 履约中台 —— MySQL 8.4 补充配置
+# 安装：复制到 /etc/mysql/mysql.conf.d/fulfillment-hub.cnf（Debian / Ubuntu 布局，
+#       包自带 !includedir），然后 systemctl restart mysql。
+# 目的：binlog 保留 30 天（备份 ADR 要求可恢复到任意时刻；核验语句见 install.md §3）。
+
+[mysqld]
+server_id                  = 1
+log_bin                    = binlog
+binlog_expire_logs_seconds = 2592000

@@ -1,0 +1,17 @@
+# 每日备份（oneshot）——由 fulfillment-hub-backup.timer 触发，也可手动：
+#   systemctl start fulfillment-hub-backup && journalctl -u fulfillment-hub-backup -n 50
+# 脚本与配置见 deploy/backup/；安装见 install.md §11。
+# 以 root 跑：需要读 /etc/fulfillment-hub/backup.cnf（0600）与 root 的 ssh key / rclone 配置。
+
+[Unit]
+Description=履约中台每日备份（mysqldump + binlog 外送）
+# timer 是 Persistent=true：开机后若错过时点会立即补跑——等 MySQL 就绪再动，避免撞上没起来的库
+After=mysql.service
+Wants=mysql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hub-backup
+# oneshot 默认无启动超时——加上它，挂死的 ssh/rsync 会被 systemd 拉掉，
+# 不至于把 flock 锁攥住不放、让每日备份从此静默停摆
+TimeoutStartSec=30min

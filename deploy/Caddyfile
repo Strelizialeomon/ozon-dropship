@@ -1,0 +1,30 @@
+# 履约中台 —— Caddy 配置
+# 安装：复制到服务器 /etc/caddy/Caddyfile（见 deploy/install.md §9），
+#       把 hub.example.com 换成你的域名；先做好 DNS A 记录（Caddy 自动申请证书，需 80/443 可达）。
+#
+# 对接（与 S1-A / S1-E 的约定，见 deploy/README.md）：
+#   - Go 监听 127.0.0.1:8080（只回环；TLS 由 Caddy 终结）
+#   - 前端静态资源 = S1-E 的 frontend/dist，同步到 /srv/fulfillment-hub/web
+# 说明：推送入口（/hooks/*，总纲 §5.9）属 S2 份——S1 是纯轮询、Go 侧没有该路由，
+#       故下方先注释；S2 落地后取消注释（来源校验届时在 Go 层做，Caddy 不做 IP 过滤）。
+
+hub.example.com {
+	encode
+
+	# 推送入口（Ozon / 1688 回调）→ Go（S2 份落地后启用）
+	#handle /hooks/* {
+	#	reverse_proxy 127.0.0.1:8080
+	#}
+
+	# 操作台接口 → Go
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# 前端静态资源；找不到文件回退 index.html（BrowserRouter 刷新任意路由不 404）
+	handle {
+		root * /srv/fulfillment-hub/web
+		try_files {path} /index.html
+		file_server
+	}
+}

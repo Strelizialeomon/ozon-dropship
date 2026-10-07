@@ -1,0 +1,13 @@
+# 每日备份定时器
+# 安装：见 install.md §11（systemctl enable --now fulfillment-hub-backup.timer）
+# Persistent=true：机器停机错过时点，开机后补跑一次。
+
+[Unit]
+Description=履约中台每日备份定时器
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

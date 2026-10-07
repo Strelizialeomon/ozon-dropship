@@ -1,0 +1,9 @@
+# mysqldump / mysql 专用凭据（不是应用账号）
+# 安装：复制到 /etc/fulfillment-hub/backup.cnf，改掉密码，chmod 600 root:root。
+# 账号与权限见 install.md §4（SELECT / SHOW VIEW / TRIGGER / PROCESS / RELOAD / REPLICATION CLIENT）。
+# 刻意用 host=localhost（走本机 socket），避免 TCP 匹配账号 hosts 的歧义。
+
+[client]
+host     = localhost
+user     = hub_backup
+password = 改我
