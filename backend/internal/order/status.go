@@ -83,6 +83,7 @@ const (
 	Tpl3PLTracking   = "3pl_tracking"   // 外部承运商、由卖家登记：我们传
 	TplNonIntegrated = "non_integrated" // 卖家自行配送：我们传
 	TplHybrid        = "hybrid"         // 俄罗斯邮政混合方案：S1 不涉及，遇到进异常池
+	TplHybryd        = "hybryd"         // ⚠️ 官方原文拼写（S1-B 实测，见 S1 父单 #5）；总纲 §7.4 写作 hybrid
 )
 
 // TrackingAction 传单号动作。
@@ -102,7 +103,9 @@ func TrackingActionFor(tpl string) (TrackingAction, string) {
 		return TrackingNone, ""
 	case Tpl3PLTracking, TplNonIntegrated:
 		return TrackingSet, ""
-	case TplHybrid:
+	case TplHybrid, TplHybryd:
+		// 拼写两版都认：官方是 hybryd，总纲写 hybrid——S1-B 已对拼写摆「改旧 spec」卡，
+		// D 不许因为这场拼写之争把真实数据漏判成 unknown_tpl。
 		return TrackingBlock, CodeHybridTpl
 	default:
 		return TrackingBlock, CodeUnknownTpl

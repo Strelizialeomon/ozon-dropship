@@ -71,13 +71,18 @@ func TestFillBackValidation(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("合法回填不该报错: %v", err)
 	}
+	// 只补国内快递号（记已付款之后的常规动作）：平台单号与实付都留空也合法。
+	onlyTracking := FillBackRequest{DomesticTrackingNo: "SF1234567890"}
+	if err := onlyTracking.Validate(); err != nil {
+		t.Fatalf("只补快递号不该报错: %v", err)
+	}
 	cases := []struct {
 		name string
 		req  FillBackRequest
 	}{
 		{"平台单号太短", FillBackRequest{PlatformOrderID: "12345", Amount: decimal.NewFromInt(1), DomesticTrackingNo: "SF1234567890"}},
 		{"平台单号带非法字符", FillBackRequest{PlatformOrderID: "1688-12345", Amount: decimal.NewFromInt(1), DomesticTrackingNo: "SF1234567890"}},
-		{"实付为 0", FillBackRequest{PlatformOrderID: "1234567890123", Amount: decimal.Zero, DomesticTrackingNo: "SF1234567890"}},
+		// 实付为 0 = 「这次不填」（自动任务已有金额）：格式层放行，够不够用由 FillBack 判。
 		{"实付为负", FillBackRequest{PlatformOrderID: "1234567890123", Amount: decimal.NewFromInt(-5), DomesticTrackingNo: "SF1234567890"}},
 		{"快递号太短", FillBackRequest{PlatformOrderID: "1234567890123", Amount: decimal.NewFromInt(1), DomesticTrackingNo: "SF12"}},
 		{"快递号带中文", FillBackRequest{PlatformOrderID: "1234567890123", Amount: decimal.NewFromInt(1), DomesticTrackingNo: "顺丰1234567890"}},

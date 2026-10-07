@@ -2,7 +2,6 @@
 package purchase
 
 import (
-	"context"
 	"errors"
 	"strconv"
 	"time"
@@ -91,12 +90,9 @@ func (h *Handler) Execute(c *gin.Context) {
 		utils.ServerError(c, "查询采购任务失败", err)
 		return
 	}
-	if task.ExecutorType != ExecutorAuto {
-		utils.FailWithCode(c, utils.CodeValidate, "人工任务不能自动执行：走备料单 → 回填", nil, nil)
-		return
-	}
-	if err := h.svc.EnqueueExecute(ctx, task.ID); err != nil {
-		utils.ServerError(c, "投递执行任务失败", err)
+	if err := h.svc.TriggerExecute(ctx, task.ID); err != nil {
+		// 不可执行要明说（别回「已投递」然后什么都不发生，重审 #10）。
+		utils.FailWithCode(c, utils.CodeValidate, err.Error(), nil, nil)
 		return
 	}
 	h.audit.Record(ctx, audit.Entry{Action: "purchase_task.execute", Object: "purchase_task:" + task.ID})
@@ -175,14 +171,6 @@ func (h *Handler) FillBack(c *gin.Context) {
 		return
 	}
 	utils.SuccessResp(c, "已回填", task)
-}
-
-// EnqueueExecute 投一条执行任务（操作台手动触发用）。
-func (s *Service) EnqueueExecute(ctx context.Context, taskID string) error {
-	if s.q == nil {
-		return errors.New("队列未装配")
-	}
-	return s.q.Enqueue(ctx, ExecuteTask(taskID))
 }
 
 func queryInt(c *gin.Context, key string) int {

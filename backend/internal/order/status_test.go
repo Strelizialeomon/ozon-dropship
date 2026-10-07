@@ -77,6 +77,8 @@ func TestTrackingActionForFiveTplValues(t *testing.T) {
 		{Tpl3PLTracking, TrackingSet, ""},
 		{TplNonIntegrated, TrackingSet, ""},
 		{TplHybrid, TrackingBlock, CodeHybridTpl},
+		// 官方原文拼写是 hybryd（S1-B 实测）：拼写两版都要认，不许漏判成 unknown_tpl。
+		{TplHybryd, TrackingBlock, CodeHybridTpl},
 		{"something_else", TrackingBlock, CodeUnknownTpl},
 	}
 	for _, tc := range cases {
@@ -106,6 +108,9 @@ func TestShouldAdvance(t *testing.T) {
 		{StatusHandedOver, StatusCancelled, true}, // 取消随时生效
 		{StatusCancelled, StatusInTransit, false}, // 终态不再动
 		{StatusReturned, StatusCompleted, false},
+		// 已送达 / 已完成之后不再被取消覆盖（拒收 / 退回属 S3 退货域的流程）。
+		{StatusDelivered, StatusCancelled, false},
+		{StatusCompleted, StatusCancelled, false},
 	}
 	for _, tc := range cases {
 		if got := shouldAdvance(tc.current, tc.target); got != tc.want {

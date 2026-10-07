@@ -10,6 +10,7 @@ import (
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/snowflake"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Repo 数据读写。
@@ -66,16 +67,26 @@ func (r *Repo) CreateTask(ctx context.Context, t *PurchaseTask) (bool, *Purchase
 
 // MarkExecuting pending → executing 的 CAS（同一任务并发执行只有一个能过）。
 func (r *Repo) MarkExecuting(ctx context.Context, taskID string) (bool, error) {
+	return r.SetStatusFrom(ctx, taskID, []string{StatusPending}, StatusExecuting)
+}
+
+// SetStatusFrom 带前置状态的 CAS：只有任务当前处在 from 之一才改，返回是否真改了。
+// 人工动作（回填 / 记已付款）与自动执行并发时，没有这道闸就会互相覆盖、状态还会倒退
+// （PR #16 重审 #7）。
+func (r *Repo) SetStatusFrom(ctx context.Context, taskID string, from []string, to string) (bool, error) {
+	if len(from) == 0 {
+		return false, errors.New("CAS 缺少前置状态")
+	}
 	res := r.db.WithContext(ctx).Model(&PurchaseTask{}).
-		Where("id = ? AND status = ? AND del_flag = ?", taskID, StatusPending, false).
-		Updates(map[string]any{"status": StatusExecuting, "updated_at": time.Now().UTC()})
+		Where("id = ? AND status IN ? AND del_flag = ?", taskID, from, false).
+		Updates(map[string]any{"status": to, "updated_at": time.Now().UTC()})
 	if res.Error != nil {
 		return false, res.Error
 	}
 	return res.RowsAffected > 0, nil
 }
 
-// SetStatus 置任务状态（不限前置状态；调用方负责合法性判断）。
+// SetStatus 无条件置状态：只给测试/脚本用，业务路径一律走 SetStatusFrom（CAS）。
 func (r *Repo) SetStatus(ctx context.Context, taskID, status string) error {
 	return r.db.WithContext(ctx).Model(&PurchaseTask{}).Where("id = ?", taskID).
 		Updates(map[string]any{"status": status, "updated_at": time.Now().UTC()}).Error
@@ -150,14 +161,21 @@ func (r *Repo) TasksForRescan(ctx context.Context, statuses []string, cutoff tim
 	return rows, err
 }
 
-// TasksForClose 已到终态前一步、且订单已签收（at_relay 及以后）的任务——补投关单。
+// TasksForClose 该关单的任务（补投用）：
+//   - 订单已签收（at_relay 及以后）+ 任务在 ordered/paid/shipped → 走完流程该关；
+//   - 订单已取消 / 退货 + 任务还在 pending/executing → 不会再采购了，也收掉（重审 #5）。
 func (r *Repo) TasksForClose(ctx context.Context, cutoff time.Time) ([]PurchaseTask, error) {
 	var rows []PurchaseTask
 	err := r.db.WithContext(ctx).Table("purchase_tasks AS t").
 		Joins("JOIN orders o ON o.id = t.order_id").
-		Where("t.del_flag = ? AND t.status IN ? AND t.updated_at < ? AND o.status IN ?",
-			false, []string{StatusOrdered, StatusPaid, StatusShipped}, cutoff,
-			[]string{"at_relay", "handed_over", "in_transit", "delivered", "completed"}).
+		Where(`t.del_flag = ? AND t.updated_at < ? AND (
+			(t.status IN ? AND o.status IN ?) OR
+			(t.status IN ? AND o.status IN ?))`,
+			false, cutoff,
+			[]string{StatusOrdered, StatusPaid, StatusShipped},
+			[]string{"at_relay", "handed_over", "in_transit", "delivered", "completed"},
+			[]string{StatusPending, StatusExecuting},
+			[]string{"cancelled", "returned"}).
 		Select("t.*").Limit(500).Scan(&rows).Error
 	return rows, err
 }
@@ -177,21 +195,23 @@ func (r *Repo) PurchaseOrderByTask(ctx context.Context, taskID string) (*Purchas
 	return &po, nil
 }
 
-// UpsertPurchaseOrder 记下单结果：没有就建，有就更新（补记 / 回填 / 记已付款共用）。
-func (r *Repo) UpsertPurchaseOrder(ctx context.Context, po *PurchaseOrder) error {
-	existing, err := r.PurchaseOrderByTask(ctx, po.TaskID)
-	if err != nil {
-		return err
-	}
-	if existing == nil {
-		if po.ID == "" {
-			po.ID = snowflake.GenStringID()
-		}
-		return r.db.WithContext(ctx).Create(po).Error
+// UpsertPurchaseOrder 记下单结果：一个任务一张采购单（唯一键 uk_purchase_orders_task，
+// 见迁移 20261007130000），没有就建、有就按字段更新——并发写不会再写出两行（重审 #7）。
+// 空值一律不覆盖已有值。overwritePlatformID 控制平台单号：
+// 人工回填/纠错传 true；自动执行器的迟到结果传 false（不把人工填的号盖掉）。
+func (r *Repo) UpsertPurchaseOrder(ctx context.Context, po *PurchaseOrder, overwritePlatformID bool) error {
+	if po.ID == "" {
+		po.ID = snowflake.GenStringID()
 	}
 	updates := map[string]any{"updated_at": time.Now().UTC()}
 	if po.PlatformOrderID != "" {
-		updates["platform_order_id"] = po.PlatformOrderID
+		if overwritePlatformID {
+			updates["platform_order_id"] = po.PlatformOrderID
+		} else {
+			// 已有非空单号就不动它（迟到的自动结果不许盖掉人工填的号）。
+			updates["platform_order_id"] = gorm.Expr(
+				"IF(platform_order_id = '' OR platform_order_id IS NULL, ?, platform_order_id)", po.PlatformOrderID)
+		}
 	}
 	if !po.Amount.IsZero() {
 		updates["amount"] = po.Amount
@@ -208,7 +228,10 @@ func (r *Repo) UpsertPurchaseOrder(ctx context.Context, po *PurchaseOrder) error
 	if po.DomesticTrackingNo != nil {
 		updates["domestic_tracking_no"] = po.DomesticTrackingNo
 	}
-	return r.db.WithContext(ctx).Model(&PurchaseOrder{}).Where("id = ?", existing.ID).Updates(updates).Error
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "task_id"}},
+		DoUpdates: clause.Assignments(updates),
+	}).Create(po).Error
 }
 
 // DomesticTrackingByOrder 国内段单号（交接对照表用）：订单 → 单号 / 承运商。

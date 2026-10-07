@@ -4,6 +4,7 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/store"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Repo 订单数据读写。
@@ -58,37 +60,18 @@ func (r *Repo) Items(ctx context.Context, orderID string) ([]OrderItem, error) {
 
 // UpsertFromOzon 按 store_id + posting_number 幂等入库（总纲 §5.5）。
 //
-// 已存在的行**只更新 Ozon 侧字段**，绝不动内部状态、中转点、买家密文——
-// 轮询每 5 分钟来一次，误写内部状态等于把人工推进的流程一脚踹回去。
-// 返回 created = 本次是不是新建。
+// 两条口径（PR #16 重审修订）：
+//   - **只在真有变化时才写库**：orders.updated_at 是超时扫描（超时未采购 / 中转点停滞 /
+//     补投）的计时器，每轮轮询无条件刷新会让这些判定永不触发；
+//   - **空值不清空**：列表载荷可能缺字段（商品行不全、没有 shipment_date / tpl），
+//     直接覆盖会把 total_amount 归零、把发货截止清成 NULL（告警从此不响）。
+//
+// 已存在的行只更新 Ozon 侧字段，绝不动内部状态、中转点、买家密文。
 func (r *Repo) UpsertFromOzon(ctx context.Context, storeID string, p Posting) (*Order, bool, error) {
-	now := time.Now().UTC()
 	existing, err := r.ByPosting(ctx, storeID, p.PostingNumber)
 	switch {
 	case err == nil:
-		updates := map[string]any{
-			"order_number":          p.OrderNumber,
-			"ozon_status":           p.Status,
-			"ozon_substatus":        nullable(p.Substatus),
-			"tpl_integration_type":  nullable(p.TplIntegrationType),
-			"ship_deadline":         p.ShipDeadline,
-			"parent_posting_number": nullable(p.ParentPostingNumber),
-			"total_amount":          p.TotalAmount(),
-			"currency":              currencyOr(p.Currency),
-			"updated_at":            now,
-		}
-		if err := r.db.WithContext(ctx).Model(&Order{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-			return nil, false, err
-		}
-		existing.OrderNumber = p.OrderNumber
-		existing.OzonStatus = p.Status
-		existing.OzonSubstatus = nullable(p.Substatus)
-		existing.TplIntegrationType = nullable(p.TplIntegrationType)
-		existing.ShipDeadline = p.ShipDeadline
-		existing.ParentPostingNumber = nullable(p.ParentPostingNumber)
-		existing.TotalAmount = p.TotalAmount()
-		existing.Currency = currencyOr(p.Currency)
-		return existing, false, nil
+		return r.applyOzonFields(ctx, existing, p, false)
 	case !errors.Is(err, ErrOrderNotFound):
 		return nil, false, err
 	}
@@ -113,56 +96,93 @@ func (r *Repo) UpsertFromOzon(ctx context.Context, storeID string, p Posting) (*
 		Currency:            currencyOr(p.Currency),
 	}
 	if err := r.db.WithContext(ctx).Create(o).Error; err != nil {
-		// 并发轮询撞唯一键：对方刚建好，转更新路径。
 		if isDuplicate(err) {
-			return r.UpsertFromOzon(ctx, storeID, p)
+			// 并发：对方刚建好 → 重查一次转更新。
+			// ⚠️ 只重试一次、不递归：若唯一键被「已软删的历史行」占着，查不到存活行，
+			// 递归会一路撞键直到 goroutine 栈溢出（栈溢出不可 recover，整个进程会崩）。
+			if again, qerr := r.ByPosting(ctx, storeID, p.PostingNumber); qerr == nil {
+				return r.applyOzonFields(ctx, again, p, false)
+			}
+			return nil, false, fmt.Errorf("订单入库撞唯一键但查不到存活行（posting=%s 可能留有已软删的历史行）: %w", p.PostingNumber, err)
 		}
 		return nil, false, err
 	}
 	return o, true, nil
 }
 
-// UpsertItems 订单行按 ozon_offer_id 对齐：新的插入、已有的更新数量与价格
-// （保留 offer_link_id——那是下游认过货源的结果，不能被轮询抹掉）。
+// applyOzonFields 把 Ozon 侧字段合并进已有订单：只写「有新值且确实变了」的那些列。
+// created 参数只用于返回值签名统一（更新路径恒为 false）。
+func (r *Repo) applyOzonFields(ctx context.Context, o *Order, p Posting, created bool) (*Order, bool, error) {
+	updates := map[string]any{}
+	now := time.Now().UTC()
+
+	if v := p.OrderNumber; v != "" && v != o.OrderNumber {
+		updates["order_number"] = v
+		o.OrderNumber = v
+	}
+	if v := p.Status; v != "" && v != o.OzonStatus {
+		updates["ozon_status"] = v
+		o.OzonStatus = v
+	}
+	if v := p.Substatus; v != "" && deref(o.OzonSubstatus) != v {
+		updates["ozon_substatus"] = v
+		o.OzonSubstatus = &v
+	}
+	if v := p.TplIntegrationType; v != "" && deref(o.TplIntegrationType) != v {
+		updates["tpl_integration_type"] = v
+		o.TplIntegrationType = &v
+	}
+	if p.ShipDeadline != nil && (o.ShipDeadline == nil || !o.ShipDeadline.Equal(*p.ShipDeadline)) {
+		updates["ship_deadline"] = p.ShipDeadline
+		o.ShipDeadline = p.ShipDeadline
+	}
+	if v := p.ParentPostingNumber; v != "" && deref(o.ParentPostingNumber) != v {
+		updates["parent_posting_number"] = v
+		o.ParentPostingNumber = &v
+	}
+	// 商品行没带就不动金额与币种（列表接口可能不带行项目）。
+	if len(p.Items) > 0 {
+		if total := p.TotalAmount(); !total.Equal(o.TotalAmount) {
+			updates["total_amount"] = total
+			o.TotalAmount = total
+		}
+		if v := p.Currency; v != "" && v != o.Currency {
+			updates["currency"] = v
+			o.Currency = v
+		}
+	}
+	if len(updates) == 0 {
+		return o, created, nil // 没有任何变化：不写库、不刷新 updated_at（计时器保真）
+	}
+	updates["updated_at"] = now
+	if err := r.db.WithContext(ctx).Model(&Order{}).Where("id = ?", o.ID).Updates(updates).Error; err != nil {
+		return nil, false, err
+	}
+	return o, created, nil
+}
+
+// UpsertItems 订单行按 (order_id, ozon_offer_id) 幂等 upsert（唯一键见迁移 20261007130000）：
+// 并发拉单也只会有一行——**绝不叠加数量**（重复行会让采购任务买双份）。
+// offer_link_id 不在这里写（那是下游认过货源的结果，轮询不许抹掉）。
 func (r *Repo) UpsertItems(ctx context.Context, orderID string, items []PostingItem) error {
 	if len(items) == 0 {
 		return nil
 	}
-	existing, err := r.Items(ctx, orderID)
-	if err != nil {
-		return err
-	}
-	byOffer := make(map[string]*OrderItem, len(existing))
-	for i := range existing {
-		byOffer[existing[i].OzonOfferID] = &existing[i]
-	}
 	now := time.Now().UTC()
 	for _, it := range items {
-		cur := byOffer[it.OzonOfferID]
-		if cur == nil {
-			row := &OrderItem{
-				ID:          snowflake.GenStringID(),
-				OrderID:     orderID,
-				OzonOfferID: it.OzonOfferID,
-				Qty:         it.Qty,
-				Price:       it.Price,
-				Currency:    currencyOr(it.Currency),
-			}
-			if err := r.db.WithContext(ctx).Create(row).Error; err != nil {
-				return err
-			}
-			continue
+		row := &OrderItem{
+			ID:          snowflake.GenStringID(),
+			OrderID:     orderID,
+			OzonOfferID: it.OzonOfferID,
+			Qty:         it.Qty,
+			Price:       it.Price,
+			Currency:    currencyOr(it.Currency),
 		}
-		if cur.Qty == it.Qty && cur.Price.Equal(it.Price) {
-			continue
-		}
-		if err := r.db.WithContext(ctx).Model(&OrderItem{}).Where("id = ?", cur.ID).
-			Updates(map[string]any{
-				"qty":        it.Qty,
-				"price":      it.Price,
-				"currency":   currencyOr(it.Currency),
-				"updated_at": now,
-			}).Error; err != nil {
+		err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "order_id"}, {Name: "ozon_offer_id"}},
+			DoUpdates: clause.Assignments(map[string]any{"qty": it.Qty, "price": it.Price, "currency": currencyOr(it.Currency), "updated_at": now}),
+		}).Create(row).Error
+		if err != nil {
 			return err
 		}
 	}
@@ -210,7 +230,8 @@ func shouldAdvance(current, target string) bool {
 		return false
 	}
 	if target == StatusCancelled || target == StatusReturned {
-		return true
+		// 已送达 / 已完成之后不再被取消覆盖：货已经交付，后续属退货域（S3 的 returned 流程）。
+		return Rank(current) < Rank(StatusDelivered)
 	}
 	return Rank(target) > Rank(current)
 }
@@ -339,6 +360,13 @@ func (r *Repo) RelayStalled(ctx context.Context, cutoff time.Time) ([]Order, err
 }
 
 // ---- 小工具 ----
+
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
 
 func nullable(s string) *string {
 	if s == "" {

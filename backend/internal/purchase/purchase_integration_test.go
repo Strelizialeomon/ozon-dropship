@@ -385,7 +385,7 @@ func TestExecuteAutoAndCrashRecovery(t *testing.T) {
 	// 1688 那边已经有单了（备注里带 posting_number）。
 	env.buyer.placed = append(env.buyer.placed, BuyerOrder{
 		PlatformOrderID: "PO-CRASH", Amount: decimal.RequireFromString("12.34"),
-		Currency: "CNY", Remark: "posting exec-crash-1", CreatedAt: time.Now().UTC(),
+		Currency: "CNY", Remark: TradeRemark("exec-crash-1", task2.ID), CreatedAt: time.Now().UTC(),
 	})
 	callsBefore := env.buyer.createCalls
 
@@ -586,5 +586,259 @@ func TestRescanRulesFindStuckTasks(t *testing.T) {
 	}
 	if len(executeTasks) != 1 || executeTasks[0].IdempotencyKey != "purchase:execute:"+auto.ID {
 		t.Fatalf("应只补投卡住的自动任务，实际 %+v", executeTasks)
+	}
+}
+
+// ---- 重审回归（PR #16 重审发现，逐条钉住）----
+
+// seedOrderTwoSkus 造一张含两个 SKU 的订单（一单多任务场景）。
+func (e *purchaseEnv) seedOrderTwoSkus(t *testing.T, postingNumber string) *order.Order {
+	t.Helper()
+	ctx := context.Background()
+	p := order.Posting{
+		PostingNumber:      postingNumber,
+		Status:             order.OzonAwaitingPackaging,
+		TplIntegrationType: order.TplOzon,
+		Currency:           "CNY",
+		Items: []order.PostingItem{
+			{OzonOfferID: "SKU-A", Qty: 1, Price: decimal.RequireFromString("10.00"), Currency: "CNY"},
+			{OzonOfferID: "SKU-B", Qty: 3, Price: decimal.RequireFromString("7.00"), Currency: "CNY"},
+		},
+	}
+	o, _, err := e.orderRepo.UpsertFromOzon(ctx, e.shop.ID, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.orderRepo.UpsertItems(ctx, o.ID, p.Items); err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
+// 重审 #1（严重）：一单多任务不许串号——兄弟任务的 1688 单不能被认领。
+func TestSiblingTasksDoNotCrossClaim(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrderTwoSkus(t, "sibling-1")
+	env.mapOffer(t, "SKU-A", catalog.Platform1688, catalog.ChannelSelfUse)
+	env.mapOffer(t, "SKU-B", catalog.Platform1688, catalog.ChannelSelfUse)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := env.repo.TasksByOrder(ctx, o.ID)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("应建 2 条任务（每个货源一条），实际 %d（err=%v）", len(tasks), err)
+	}
+
+	if err := env.svc.Execute(ctx, tasks[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if env.buyer.createCalls != 1 {
+		t.Fatalf("第一条任务应下单 1 次，实际 %d", env.buyer.createCalls)
+	}
+	// 第二条任务执行：它的 1688 单必须自己下，不能认领兄弟的单。
+	if err := env.svc.Execute(ctx, tasks[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if env.buyer.createCalls != 2 {
+		t.Fatalf("兄弟任务被串号认领了：第二条任务没有真下单（createCalls=%d）", env.buyer.createCalls)
+	}
+	poA, _ := env.repo.PurchaseOrderByTask(ctx, tasks[0].ID)
+	poB, _ := env.repo.PurchaseOrderByTask(ctx, tasks[1].ID)
+	if poA == nil || poB == nil {
+		t.Fatal("两条任务都应有采购单")
+	}
+	if poA.PlatformOrderID == poB.PlatformOrderID {
+		t.Fatalf("两条任务记了同一个平台单号 %s（串号）", poA.PlatformOrderID)
+	}
+}
+
+// 重审 #5：订单已取消 / 退货后不再下单，未采购的任务收掉。
+func TestExecuteSkipsTerminalOrder(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "cancel-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	// Ozon 侧取消（轮询把订单推进 cancelled）。
+	if _, err := env.orders.Advance(ctx, o.ID, order.StatusCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.Execute(ctx, tasks[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if env.buyer.createCalls != 0 {
+		t.Fatalf("已取消的订单绝不该再下单，实际下单 %d 次", env.buyer.createCalls)
+	}
+	got, _ := env.repo.TaskByID(ctx, tasks[0].ID)
+	if got.Status != StatusClosed {
+		t.Fatalf("未采购的任务应收掉（closed），实际 %s", got.Status)
+	}
+	// 收掉之后补投关单也不再反复投递。
+	if err := env.svc.CloseOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 重审 #2（路一）：记已付款之后还能补回填国内快递号 → shipped → 交接表拿得到单号。
+func TestFillBackAfterMarkPaid(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "paid-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	taskID := tasks[0].ID
+	if err := env.svc.Execute(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.MarkPaid(ctx, taskID, decimal.RequireFromString("12.34"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// 只补快递号（平台单号与实付自动执行时已记过）。
+	got, err := env.svc.FillBack(ctx, taskID, FillBackRequest{
+		DomesticCarrier: "顺丰", DomesticTrackingNo: "SF1234567890",
+	})
+	if err != nil {
+		t.Fatalf("记已付款之后应能补回填: %v", err)
+	}
+	if got.Status != StatusShipped {
+		t.Fatalf("补回填后应 shipped，实际 %s", got.Status)
+	}
+	po, _ := env.repo.PurchaseOrderByTask(ctx, taskID)
+	if po == nil || po.DomesticTrackingNo == nil || *po.DomesticTrackingNo != "SF1234567890" {
+		t.Fatalf("国内段单号应入库: %+v", po)
+	}
+	if po.Amount.String() != "12.34" {
+		t.Fatalf("补回填不该把已记的实付改掉: %s", po.Amount)
+	}
+	// 交接对照表那条边要的数据真的能取到。
+	tracking, err := env.repo.DomesticTrackingByOrder(ctx, []string{o.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracking[o.ID].TrackingNo != "SF1234567890" {
+		t.Fatalf("交接表拿不到国内快递号: %+v", tracking)
+	}
+	// 订单推进到 inbound（国内段在途）。
+	if env.orderStatus(t, o.ID) != order.StatusInbound {
+		t.Errorf("订单应 inbound，实际 %s", env.orderStatus(t, o.ID))
+	}
+}
+
+// 重审 #5（路一）：国内段停滞扫描覆盖 ordered / paid（卖家一直没发货也算没动静）。
+func TestSweepCoversOrderedAndPaidTasks(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	stale := now.Add(-73 * time.Hour)
+	for i, status := range []string{StatusOrdered, StatusPaid, StatusShipped} {
+		task := &PurchaseTask{
+			ID: snowflake.GenStringID(), OrderID: "o-stall", Channel: catalog.ChannelSelfUse,
+			ExecutorType: ExecutorAuto, Status: status, CreatedAt: stale, UpdatedAt: stale,
+		}
+		if err := env.db.Create(task).Error; err != nil {
+			t.Fatal(err)
+		}
+		_ = i
+	}
+	if err := env.svc.HandleSweep(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	env.db.Model(&order.Exception{}).Where("code = ?", order.CodeDomesticStalled).Count(&n)
+	if n != 3 {
+		t.Fatalf("三种状态都应报国内段停滞，实际 %d 条", n)
+	}
+}
+
+// 重审 #10：执行入口对不可执行的任务要明确报错（不静默当成功）。
+func TestTriggerExecuteStates(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "trigger-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	taskID := tasks[0].ID
+
+	if err := env.svc.TriggerExecute(ctx, taskID); err != nil {
+		t.Fatalf("pending 任务应能执行: %v", err)
+	}
+	// 置为 exception：重试入口允许（救回失败单）。
+	if err := env.repo.SetStatus(ctx, taskID, StatusException); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.TriggerExecute(ctx, taskID); err != nil {
+		t.Fatalf("exception 任务应允许重试: %v", err)
+	}
+	// 已关单：明确报错。
+	if err := env.repo.SetStatus(ctx, taskID, StatusClosed); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.TriggerExecute(ctx, taskID); err == nil {
+		t.Fatal("closed 任务应明确报错，而不是回「已投递」")
+	}
+	// 人工任务：明确报错。
+	manual := &PurchaseTask{
+		ID: snowflake.GenStringID(), OrderID: o.ID, Channel: catalog.ChannelManual,
+		ExecutorType: ExecutorManual, Status: StatusPending, CreatedAt: time.Now().UTC(),
+	}
+	if err := env.db.Create(manual).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.TriggerExecute(ctx, manual.ID); err == nil {
+		t.Fatal("人工任务不该能自动执行")
+	}
+}
+
+// 重审 #7：迟到的自动执行结果不打回状态、也不盖掉人工填的平台单号。
+func TestLateRecordDoesNotRegress(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "late-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	task, _ := env.repo.TaskByID(ctx, tasks[0].ID)
+	// 模拟「自动执行器正卡在 executing（退避重试中）」。
+	if ok, err := env.repo.MarkExecuting(ctx, task.ID); err != nil || !ok {
+		t.Fatalf("置 executing 失败: ok=%v err=%v", ok, err)
+	}
+
+	// 人工先回填（写平台单号 + 推到 shipped）。
+	if _, err := env.svc.FillBack(ctx, task.ID, FillBackRequest{
+		PlatformOrderID: "MANUAL123456", Amount: decimal.RequireFromString("9.90"),
+		DomesticTrackingNo: "SF1234567890",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 迟到的自动结果这才落库：状态不能被打回 ordered，单号也不能被盖。
+	if err := env.svc.recordOrdered(ctx, task, &BuyerOrder{
+		PlatformOrderID: "AUTO-LATE", Amount: decimal.RequireFromString("5.00"),
+		Currency: "CNY", Remark: TradeRemark("late-1", task.ID),
+	}, "迟到"); err != nil {
+		t.Fatalf("迟到落库不该报错: %v", err)
+	}
+	after, _ := env.repo.TaskByID(ctx, task.ID)
+	if after.Status != StatusShipped {
+		t.Fatalf("状态被自动结果打回了：%s，期望 shipped", after.Status)
+	}
+	po, _ := env.repo.PurchaseOrderByTask(ctx, task.ID)
+	if po.PlatformOrderID != "MANUAL123456" {
+		t.Fatalf("人工填的平台单号被盖掉了：%s", po.PlatformOrderID)
 	}
 }

@@ -10,6 +10,7 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -73,14 +74,25 @@ func (Exception) TableName() string { return "exceptions" }
 // ErrExceptionNotFound 异常不存在。
 var ErrExceptionNotFound = errors.New("异常不存在")
 
+// Notifier 异常告警出口（*notify.Notifier 满足；装配层注入）。
+// 总纲 §5.2 的标题就是「异常判定（**自动进池 + 通知**）」——只进池不告警，
+// 表外状态这类问题会被静默吞掉，等人在池子里翻到已经晚了。
+type Notifier interface {
+	Notify(dedupeKey, title, text string)
+}
+
 // Exceptions 异常池读写。
 type Exceptions struct {
-	db    *gorm.DB
-	audit *audit.Recorder
+	db     *gorm.DB
+	audit  *audit.Recorder
+	notify Notifier
 }
 
 // NewExceptions 构造（异常写入同样留审计，总纲 §5.11「自动与手动动作一视同仁」）。
 func NewExceptions(db *gorm.DB) *Exceptions { return &Exceptions{db: db, audit: audit.New(db)} }
+
+// SetNotifier 注入告警出口；不注 = 只进池不告警（测试与不配飞书的部署）。
+func (e *Exceptions) SetNotifier(n Notifier) { e.notify = n }
 
 // Raise 报一条异常。同对象同 code 已有未处理行时静默去重（返回 nil）。
 // detail 里放人能看懂的上下文（单号、金额、原始状态值等）。
@@ -109,6 +121,11 @@ func (e *Exceptions) Raise(ctx context.Context, refType, refID, code, detail str
 		Object: "exception:" + row.ID,
 		Detail: mustJSON(map[string]string{"ref_type": refType, "ref_id": refID, "code": code, "detail": detail}),
 	})
+	if e.notify != nil {
+		// 去重键 = 对象 + 码：同一对象同一码的重复告警由 notify 自己的窗口合并。
+		e.notify.Notify("exception:"+refType+":"+refID+":"+code, "履约异常",
+			fmt.Sprintf("[%s] %s/%s：%s", code, refType, refID, detail))
+	}
 	return nil
 }
 

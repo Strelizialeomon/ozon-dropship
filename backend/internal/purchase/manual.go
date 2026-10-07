@@ -91,14 +91,15 @@ type FillBackRequest struct {
 	PaidAt             *time.Time      `json:"paid_at"`
 }
 
-// Validate 格式校验：平台单号、实付金额、国内快递号。
+// Validate 格式校验：国内快递号必填；平台单号 / 实付给了就校格式
+// （「没给的话够不够用」由 FillBack 对着既有采购单判——自动任务已有单号与金额，
+// 人工只是补快递号，不该被逼着重填一遍，重审 #2）。
 func (r *FillBackRequest) Validate() error {
-	id := strings.TrimSpace(r.PlatformOrderID)
-	if !platformOrderIDPattern.MatchString(id) {
+	if id := strings.TrimSpace(r.PlatformOrderID); id != "" && !platformOrderIDPattern.MatchString(id) {
 		return fmt.Errorf("平台单号格式不对（6-64 位字母数字）")
 	}
-	if !r.Amount.GreaterThan(decimal.Zero) {
-		return fmt.Errorf("实付金额必须大于 0")
+	if r.Amount.IsNegative() {
+		return fmt.Errorf("实付金额不能为负")
 	}
 	if !trackingNoPattern.MatchString(strings.TrimSpace(r.DomesticTrackingNo)) {
 		return fmt.Errorf("国内快递号格式不对（6-32 位字母数字或连字符）")
@@ -106,7 +107,11 @@ func (r *FillBackRequest) Validate() error {
 	return nil
 }
 
-// FillBack 人工执行器回填：平台单号、实付、国内快递号 → 采购单入库 → 任务 shipped。
+// FillBack 回填：平台单号 / 实付 / 国内快递号 → 采购单入库 → 任务 shipped。
+//
+// 允许的前置状态含 ordered / paid：「记已付款」之后卖家发货，人工把国内快递号补进来
+// （子 spec §3.3「推进 paid，随后回填」；重审 #2）。平台单号与实付在既有采购单里
+// 没有时才必填——自动任务下单时已记过。
 func (s *Service) FillBack(ctx context.Context, taskID string, req FillBackRequest) (*PurchaseTask, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
@@ -115,17 +120,26 @@ func (s *Service) FillBack(ctx context.Context, taskID string, req FillBackReque
 	if err != nil {
 		return nil, err
 	}
-	switch task.Status {
-	case StatusPending, StatusExecuting, StatusOrdered, StatusException:
-	case StatusPaid, StatusShipped, StatusClosed:
-		return nil, fmt.Errorf("任务已是「%s」，不能再回填", task.Status)
+	po, err := s.repo.PurchaseOrderByTask(ctx, task.ID)
+	if err != nil {
+		return nil, err
 	}
+	if (po == nil || po.PlatformOrderID == "") && strings.TrimSpace(req.PlatformOrderID) == "" {
+		return nil, fmt.Errorf("这笔采购还没有平台单号，回填时请一并填上")
+	}
+	if (po == nil || po.Amount.IsZero()) && !req.Amount.GreaterThan(decimal.Zero) {
+		return nil, fmt.Errorf("这笔采购还没有实付金额，回填时请一并填上")
+	}
+
 	paidAt := req.PaidAt
+	if paided := po != nil && po.PaidAt != nil; paided {
+		paidAt = po.PaidAt // 已经记过付款时间：不被回填抹掉
+	}
 	if paidAt == nil {
 		now := s.now()
 		paidAt = &now
 	}
-	po := &PurchaseOrder{
+	row := &PurchaseOrder{
 		TaskID:             task.ID,
 		PlatformOrderID:    strings.TrimSpace(req.PlatformOrderID),
 		Amount:             req.Amount,
@@ -134,17 +148,28 @@ func (s *Service) FillBack(ctx context.Context, taskID string, req FillBackReque
 		DomesticCarrier:    nullable(strings.TrimSpace(req.DomesticCarrier)),
 		DomesticTrackingNo: nullable(strings.TrimSpace(req.DomesticTrackingNo)),
 	}
-	if err := s.repo.UpsertPurchaseOrder(ctx, po); err != nil {
+	// 先写采购单（失败可重试、状态没动过），再 CAS 推进状态（并发下不倒退，重审 #7）。
+	if err := s.repo.UpsertPurchaseOrder(ctx, row, true); err != nil {
 		return nil, fmt.Errorf("记采购单失败: %w", err)
 	}
-	if err := s.repo.SetStatus(ctx, task.ID, StatusShipped); err != nil {
+	ok, err := s.repo.SetStatusFrom(ctx, task.ID,
+		[]string{StatusPending, StatusExecuting, StatusOrdered, StatusException, StatusPaid}, StatusShipped)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		fresh, _ := s.repo.TaskByID(ctx, task.ID)
+		cur := task.Status
+		if fresh != nil {
+			cur = fresh.Status
+		}
+		return nil, fmt.Errorf("任务已是「%s」，不能再回填", cur)
 	}
 	s.syncOrderStatus(ctx, task.OrderID)
 	s.audit.Record(ctx, audit.Entry{
 		Action: "purchase_task.fill_back", Object: "purchase_task:" + task.ID,
 		Detail: mustJSON(map[string]string{
-			"platform_order_id": po.PlatformOrderID,
+			"platform_order_id": row.PlatformOrderID,
 			"amount":            req.Amount.String(),
 			"domestic_tracking": req.DomesticTrackingNo,
 		}),
@@ -189,11 +214,16 @@ func (s *Service) MarkPaid(ctx context.Context, taskID string, amount decimal.De
 	}
 	if err := s.repo.UpsertPurchaseOrder(ctx, &PurchaseOrder{
 		TaskID: task.ID, Amount: amount, PaidAt: paidAt,
-	}); err != nil {
+	}, true); err != nil {
 		return nil, err
 	}
-	if err := s.repo.SetStatus(ctx, task.ID, StatusPaid); err != nil {
+	// CAS：已被回填推到 shipped / 已关单的任务不会被记已付款打回去（重审 #7）。
+	ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusOrdered, StatusException}, StatusPaid)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("任务状态已变化，记已付款未生效，请刷新后重试")
 	}
 	s.syncOrderStatus(ctx, task.OrderID)
 	s.audit.Record(ctx, audit.Entry{

@@ -299,10 +299,19 @@ func (s *Service) Label(ctx context.Context, orderID string) ([]byte, string, er
 }
 
 // HandoverCSV 货代仓交接对照表：国内快递号 ↔ posting_number ↔ 面单（总纲 §5.7）。
+// 翻页取全：单页上限 200，超出的静默截断会让货代少收几十单（重审 #6）。
 func (s *Service) HandoverCSV(ctx context.Context, relayPointID string) ([]byte, error) {
-	items, _, err := s.List(ctx, ListFilter{RelayPointID: relayPointID, PageSize: 200})
-	if err != nil {
-		return nil, err
+	const pageSize = 200
+	var items []ListItem
+	for page := 1; ; page++ {
+		rows, total, err := s.List(ctx, ListFilter{RelayPointID: relayPointID, Page: page, PageSize: pageSize})
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, rows...)
+		if len(rows) == 0 || len(items) >= int(total) {
+			break
+		}
 	}
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // BOM：让 Excel 正确识别 UTF-8

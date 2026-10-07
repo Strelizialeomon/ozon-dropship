@@ -1,7 +1,7 @@
 # spec-s1d-fulfillment —— S1-D 履约编排（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-D**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.0（2026-10-07；实施中，见实施 PR）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
+> Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.1（2026-10-07：PR #16 重审处置——实现修订 13 项、明确不改 1 项，见 §7 第 2 次）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
 > 跨份验收与协作声明：S1 父 issue（待开）
 
 ## 1. 管什么 / 不管什么
@@ -76,3 +76,30 @@ PR #4 重审（owner 2026-10-07 点选「改」）的处置：
 | 4-1 | 严重 | 异常池无存储载体 | 改：落 `exceptions` 表（总纲新增）；验收同步 |
 | 4-3 | 中 | 同步时间无写方 | 改：拉单成功写 `stores.last_sync_at`；验收同步 |
 | 4-8 | 轻微 | 「下单 → paid」推进未定义 | 改：定「记已付款」路径；验收同步 |
+
+**第 2 次：重审（owner 2026-10-07 在 PR #16 点选「重审」，基准 issue-9 HEAD）**，原文见 PR #16 评论。两路：规格符合性（8 条 = 严重 1、中 3、轻微 4）、对抗式找 bug（14 条 = 严重 2、中 8、轻微 4）。owner 点选「全改（含轻微）+ 加唯一键迁移」，处置如下（表内 1-x = 路一发现，2-x = 路二发现）：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 1-1 | 严重 | 超时 / 停滞 / 补投扫描的计时器用 `orders.updated_at`，而轮询每轮无条件刷新它 → 判定永不触发 | 改：拉单只在字段真有变化时才写库、才动 `updated_at`；回归 `TestPollDoesNotRefreshUpdatedAtSoSweepFires` |
+| 2-1 | 严重 | 一单多任务的防重核对只按 posting_number 匹配 → 兄弟任务的 1688 单被串号认领 | 改：下单留言加任务标记（`TradeRemark`），核对要求 posting + 标记同时命中；回归 `TestSiblingTasksDoNotCrossClaim` |
+| 2-2 | 严重 | 并发拉单 → `order_items` 重复行 → 采购数量翻倍 | 改：迁移 `20261007130000` 加唯一键 `order_items(order_id, ozon_offer_id)` + 幂等 upsert；回归 `TestUpsertItemsIdempotentUnderConcurrentWrites` |
+| 1-2 | 中 | 「记已付款」之后没有入口回填国内快递号（交接对照表拿不到单号） | 改：回填允许从 `paid` 进入，平台单号 / 实付在既有采购单缺时才必填；回归 `TestFillBackAfterMarkPaid` |
+| 1-3 | 中 | 总纲 §5.2「异常判定（自动进池 **+ 通知**）」只落了进池 | 改：异常写入同时走飞书（去重键 = 对象 + 码）；回归 `TestExceptionRaiseNotifies` |
+| 1-4 | 中 | `tpl_integration_type` 只认 `hybrid`，而官方原文是 `hybryd`（B 份实测） | 改：两版拼写都认（S1-B 已对拼写单独摆卡）；单测覆盖两个值 |
+| 2-4 | 中 | 列表载荷缺字段时清空 `total_amount` / `ship_deadline` / `tpl_integration_type` | 改：更新路径「空值不清空」+ 无商品行的老单补拉详情 |
+| 2-5 | 中 | 已取消 / 退货订单仍会被自动执行器真实下单，且任务关不掉 | 改：订单终态不再下单、未采购任务收掉（已采购的留人工核）；回归 `TestExecuteSkipsTerminalOrder` |
+| 2-6 | 中 | 交接对照表静默截断在 200 行 | 改：翻页取全；回归 `TestHandoverCSVExportsAllPages` |
+| 2-7 | 中 | 任务状态迁移无 CAS：人工与自动并发会状态倒退、采购单被覆盖 | 改：状态迁移全走 CAS（`SetStatusFrom`）+ 采购单唯一键 + 迟到自动结果不盖人工单号；回归 `TestLateRecordDoesNotRegress` |
+| 2-8 | 中 | 同一订单可能写出两行 `shipments` | 改：迁移加唯一键 `shipments(order_id)` + 撞键重查；回归 `TestGetOrCreateSingleRowUnderConcurrency` |
+| 2-9 | 中 | 拉未完成单失败被吞，`last_sync_at` 照前移 → 老单状态变化永久漏接 | 改：整轮失败、不写同步游标；回归 `TestUnfulfilledFailureFailsPollAndKeepsCursor` |
+| 2-10 | 中 | `exception` 任务的「执行」接口静默无效（还回成功） | 改：执行入口可执行才投递、不可执行明确报错；`exception` 允许重试；回归 `TestTriggerExecuteStates` |
+| 1-5 | 轻微 | 国内段停滞只扫 `shipped` | 改：`ordered` / `paid` / `shipped` 都扫；回归 `TestSweepCoversOrderedAndPaidTasks` |
+| 1-6 | 轻微 | 两处实现期决定未进清单（`unknown_tpl` 码、中转点模型落 order 包） | 改：补进 PR 正文的自定细节 |
+| 1-7 | 轻微 | 两个文件超出父单的共享件声明 | 改：已在父单 #5 补声明（含新增迁移） |
+| 2-11 | 轻微 | 软删行占着唯一键 → `UpsertFromOzon` 无限递归（栈溢出会带崩进程） | 改：限次重试 + 明确报错；回归 `TestSoftDeletedOrderDoesNotRecurse` |
+| 2-12 | 轻微 | `completed` 状态没有任何写方 | **不改**：总纲 §5.2 映射表里没有一条 Ozon 状态映射到 `completed`，S1 不造写方；等 S3（轨迹 / 退货）/ S4（对账）驱动 |
+| 2-13 | 轻微 | 已 `delivered` 的订单仍会被 cancelled 旁支改回去 | 改：送达 / 完成之后不再被取消覆盖（拒收 / 退回属 S3 退货流程）；单测补两例 |
+| 2-14 | 轻微 | 记采购单失败绕过 `retryOrFail` → 任务永远停在 `executing` | 改：记录失败走 `retryOrFail`（重试用尽进异常池） |
+
+**新增迁移**：`backend/migrations/20261007130000_s1d_unique_keys.sql`（三个唯一键 + 历史去重），已在父单 #5 补声明；`goose up/down` 实测通过。

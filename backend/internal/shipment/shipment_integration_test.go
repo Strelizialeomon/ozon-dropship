@@ -4,9 +4,11 @@ package shipment
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/catalog"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/audit"
@@ -399,5 +401,63 @@ func TestListPackingQueue(t *testing.T) {
 	}
 	if items[0].TrackingAction != "set" {
 		t.Errorf("3pl_tracking 的动作应为 set，实际 %s", items[0].TrackingAction)
+	}
+}
+
+// ---- 重审回归（PR #16 重审发现，逐条钉住）----
+
+// 重审 #8：并发取用发运记录只会有一行（唯一键 + 撞键重查）。
+func TestGetOrCreateSingleRowUnderConcurrency(t *testing.T) {
+	env := newShipEnv(t)
+	ctx := context.Background()
+	o := env.seedOrder(t, "one-shipment", order.TplOzon, &env.relay.ID)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := env.repo.GetOrCreate(ctx, o.ID); err != nil {
+				t.Errorf("GetOrCreate 失败: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var n int64
+	env.db.Model(&Shipment{}).Where("order_id = ?", o.ID).Count(&n)
+	if n != 1 {
+		t.Fatalf("一个订单只应有一条发运记录，实际 %d 行", n)
+	}
+}
+
+// 重审 #6：交接对照表翻页取全，不静默截断在 200 行。
+func TestHandoverCSVExportsAllPages(t *testing.T) {
+	env := newShipEnv(t)
+	ctx := context.Background()
+
+	const total = 205 // 超过单页上限 200
+	now := time.Now().UTC()
+	rows := make([]order.Order, 0, total)
+	relayID := env.relay.ID
+	for i := 0; i < total; i++ {
+		rows = append(rows, order.Order{
+			ID: snowflake.GenStringID(), StoreID: env.shop.ID,
+			PostingNumber: fmt.Sprintf("bulk-%03d", i), Status: order.StatusInbound,
+			OzonStatus: order.OzonAwaitingPackaging, RelayPointID: &relayID,
+			Currency: "CNY", CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	if err := env.db.CreateInBatches(rows, 100).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	csvData, err := env.svc.HandoverCSV(ctx, relayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Count(string(csvData), "bulk-")
+	if got != total {
+		t.Fatalf("对照表应含全部 %d 单，实际 %d 单（翻页没取全）", total, got)
 	}
 }

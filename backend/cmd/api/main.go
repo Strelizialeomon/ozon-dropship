@@ -134,6 +134,9 @@ func main() {
 	catalogHandler := catalog.NewHandler(catalogRepo, auditRec)
 
 	exceptions := order.NewExceptions(db.DB)
+	// 总纲 §5.2「异常判定（自动进池 + 通知）」：异常写入同时走飞书，
+	// 去重键 = 对象 + 码（notify 自己的窗口合并重复）。
+	exceptions.SetNotifier(notifier)
 	orderRepo := order.NewRepo(db.DB)
 	relayRepo := order.NewRelayRepo(db.DB)
 	// TODO(S1-B 合并后)：把 ozon 客户端适配成 order.PostingSourceFactory 接进第 5 参，

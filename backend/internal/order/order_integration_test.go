@@ -5,6 +5,7 @@ package order
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,10 +24,11 @@ import (
 // ---- 假实现（S1-B / 队列未接入时的替身）----
 
 type fakeSource struct {
-	listed      []Posting
-	unfulfilled []Posting
-	details     map[string]*Posting
-	listErr     error
+	listed         []Posting
+	unfulfilled    []Posting
+	details        map[string]*Posting
+	listErr        error
+	unfulfilledErr error
 }
 
 func (f *fakeSource) ListPostings(context.Context, ListPostingsRequest) ([]Posting, error) {
@@ -37,6 +39,9 @@ func (f *fakeSource) ListPostings(context.Context, ListPostingsRequest) ([]Posti
 }
 
 func (f *fakeSource) ListUnfulfilled(context.Context, ListPostingsRequest) ([]Posting, error) {
+	if f.unfulfilledErr != nil {
+		return nil, f.unfulfilledErr
+	}
 	return f.unfulfilled, nil
 }
 
@@ -405,5 +410,175 @@ func TestExceptionResolve(t *testing.T) {
 	// 已处理的再点一次不报错。
 	if _, err := env.exc.Resolve(ctx, row.ID, "", "boss"); err != nil {
 		t.Fatalf("重复处理不该报错: %v", err)
+	}
+}
+
+// ---- 重审回归（PR #16 重审发现，逐条钉住）----
+
+// fakeNotifier 记下异常告警（总纲 §5.2「自动进池 + 通知」）。
+type fakeNotifier struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (f *fakeNotifier) Notify(dedupeKey, _, _ string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, dedupeKey)
+}
+
+func (f *fakeNotifier) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.keys)
+}
+
+// 重审 #1/#3：内容没变时拉单不许刷新 updated_at，否则超时扫描永不触发。
+func TestPollDoesNotRefreshUpdatedAtSoSweepFires(t *testing.T) {
+	env := newOrderEnv(t)
+	ctx := context.Background()
+
+	env.src.listed = []Posting{posting("stale-1", OzonAwaitingPackaging, item("SKU-1", 1, "1.00"))}
+	if err := env.svc.PollStore(ctx, env.shop.ID); err != nil {
+		t.Fatal(err)
+	}
+	o, err := env.repo.ByPosting(ctx, env.shop.ID, "stale-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 把这单拨老 25 小时（模拟「一直没动静」），此后再拉两轮（Ozon 侧数据没变）。
+	stale := time.Now().UTC().Add(-25 * time.Hour).Truncate(time.Millisecond)
+	if err := env.db.Model(&Order{}).Where("id = ?", o.ID).Update("updated_at", stale).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := env.svc.PollStore(ctx, env.shop.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after, err := env.repo.ByID(ctx, o.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.UpdatedAt.Equal(stale) {
+		t.Fatalf("内容没变时不该刷新 updated_at（计时器会失真）：%v → %v", stale, after.UpdatedAt)
+	}
+
+	// 扫描必须能扫到它（旧实现在这里一条都不报）。
+	if err := env.svc.HandleSweep(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	env.db.Model(&Exception{}).Where("ref_id = ? AND code = ?", o.ID, CodePurchaseTimeout).Count(&n)
+	if n != 1 {
+		t.Fatalf("应报 1 条超时未采购，实际 %d", n)
+	}
+}
+
+// 重审 #2：并发 upsert 商品行只会有一行，数量绝不翻倍。
+func TestUpsertItemsIdempotentUnderConcurrentWrites(t *testing.T) {
+	env := newOrderEnv(t)
+	ctx := context.Background()
+
+	o, _, err := env.repo.UpsertFromOzon(ctx, env.shop.ID, posting("items-1", OzonAwaitingPackaging))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []PostingItem{item("SKU-1", 2, "10.00")}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = env.repo.UpsertItems(ctx, o.ID, items)
+		}()
+	}
+	wg.Wait()
+	// 再顺序来一次。
+	if err := env.repo.UpsertItems(ctx, o.ID, items); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := env.repo.Items(ctx, o.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("同一 (order, offer) 只应有一行，实际 %d 行（重复行会让采购任务买双份）", len(rows))
+	}
+	if rows[0].Qty != 2 {
+		t.Fatalf("数量被叠加了：%d，期望 2", rows[0].Qty)
+	}
+}
+
+// 重审 #9：拉未完成单失败要让整轮失败，不能悄悄前移同步游标。
+func TestUnfulfilledFailureFailsPollAndKeepsCursor(t *testing.T) {
+	env := newOrderEnv(t)
+	ctx := context.Background()
+
+	env.src.listed = []Posting{posting("uf-1", OzonAwaitingPackaging, item("SKU-1", 1, "1.00"))}
+	env.src.unfulfilledErr = errors.New("429 限流")
+	if err := env.svc.PollStore(ctx, env.shop.ID); err == nil {
+		t.Fatal("未完成单拉失败应让整轮失败（否则老单状态变化永久漏接）")
+	}
+	fresh, err := env.shops.ByID(ctx, env.shop.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.LastSyncAt != nil {
+		t.Fatal("本轮失败不该写 last_sync_at：游标前移会把还没扫到的老单甩出窗口")
+	}
+
+	// 下一轮恢复正常：窗口仍覆盖这批单，能正常入库。
+	env.src.unfulfilledErr = nil
+	if err := env.svc.PollStore(ctx, env.shop.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.repo.ByPosting(ctx, env.shop.ID, "uf-1"); err != nil {
+		t.Fatalf("恢复后应能正常入库: %v", err)
+	}
+}
+
+// 重审 #11：唯一键被软删历史行占用时，报错而不是无限递归（栈溢出会带崩整个进程）。
+func TestSoftDeletedOrderDoesNotRecurse(t *testing.T) {
+	env := newOrderEnv(t)
+	ctx := context.Background()
+
+	dead := &Order{
+		ID: snowflake.GenStringID(), StoreID: env.shop.ID, PostingNumber: "dead-1",
+		Status: StatusCancelled, OzonStatus: OzonCancelled, Currency: "CNY", DelFlag: true,
+	}
+	if err := env.db.Create(dead).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := env.repo.UpsertFromOzon(ctx, env.shop.ID, posting("dead-1", OzonAwaitingPackaging))
+	if err == nil {
+		t.Fatal("唯一键被软删行占用时应明确报错")
+	}
+	if !strings.Contains(err.Error(), "软删") {
+		t.Fatalf("错误信息要指认原因（软删历史行占键），实际: %v", err)
+	}
+}
+
+// 重审 #3（路一）：异常进池要同时告警（总纲 §5.2「自动进池 + 通知」）。
+func TestExceptionRaiseNotifies(t *testing.T) {
+	env := newOrderEnv(t)
+	ctx := context.Background()
+
+	n := &fakeNotifier{}
+	env.exc.SetNotifier(n)
+	if err := env.exc.Raise(ctx, RefOrder, "order-n1", CodeArbitration, "仲裁"); err != nil {
+		t.Fatal(err)
+	}
+	// 同一对象同一码重复报：库里去了重，告警也只有一次。
+	if err := env.exc.Raise(ctx, RefOrder, "order-n1", CodeArbitration, "仲裁（重复）"); err != nil {
+		t.Fatal(err)
+	}
+	if n.count() != 1 {
+		t.Fatalf("去重后只应告警 1 次，实际 %d", n.count())
 	}
 }

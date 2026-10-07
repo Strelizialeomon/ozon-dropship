@@ -41,6 +41,9 @@ const (
 	RelayStall      = 24 * time.Hour // 中转点签收后 24 小时未交运
 )
 
+// ScanLimit 单轮扫描上限：命中上限说明积压超出单轮处理能力，记警告（不许静默截断）。
+const ScanLimit = 500
+
 // Enqueuer 入队（接口放使用方；*queue.Client 满足，测试用假实现）。
 // 签名与 queue.Client.Enqueue 完全一致（含可变选项）——否则不满足接口。
 type Enqueuer interface {
@@ -202,11 +205,13 @@ func (s *Service) PollStore(ctx context.Context, storeID string) error {
 		return fmt.Errorf("拉单失败 store=%s: %w", shop.Name, err)
 	}
 	// 未完成单兜底：老单的状态变化（尤其「平台未放行 → awaiting_packaging」）靠它捞回来。
-	if unfulfilled, err := src.ListUnfulfilled(ctx, ListPostingsRequest{To: now}); err == nil {
-		postings = append(postings, unfulfilled...)
-	} else {
-		logger.Errorf("[order] 拉未完成单失败 store=%s: %v", shop.Name, err)
+	// ⚠️ 它失败就整轮失败：若照常写 last_sync_at，时间窗会一路前移，
+	// 那个「早就建好、这轮才变 awaiting_packaging」的订单再不会被任何窗口捞回（重审 #9）。
+	unfulfilled, err := src.ListUnfulfilled(ctx, ListPostingsRequest{To: now})
+	if err != nil {
+		return fmt.Errorf("拉未完成单失败 store=%s（本轮不写 last_sync_at，窗口下轮重扫）: %w", shop.Name, err)
 	}
+	postings = append(postings, unfulfilled...)
 
 	seen := map[string]bool{}
 	applied := 0
@@ -232,13 +237,21 @@ func (s *Service) PollStore(ctx context.Context, storeID string) error {
 
 // applyPosting 单条 posting 入库 + 按映射表执行动作（总纲 §5.2）。
 func (s *Service) applyPosting(ctx context.Context, shop *store.Shop, src PostingSource, p Posting) error {
-	_, err := s.repo.ByPosting(ctx, shop.ID, p.PostingNumber)
+	existing, err := s.repo.ByPosting(ctx, shop.ID, p.PostingNumber)
 	isNew := errors.Is(err, ErrOrderNotFound)
 	if err != nil && !isNew {
 		return err
 	}
-	if isNew {
-		// 新单拉权威详情（列表接口的商品行可能不全）；拉不到就用列表数据兜。
+	// 拉详情的两种情况：① 新单；② 老单但库里还没有商品行（首次拉详情失败过，
+	// 更新路径不会补，订单会永远卡在「没有商品行」——重审 #4 的衍生项）。
+	needDetail := isNew
+	if !needDetail {
+		if items, ierr := s.repo.Items(ctx, existing.ID); ierr == nil && len(items) == 0 {
+			needDetail = true
+		}
+	}
+	if needDetail {
+		// 列表接口的商品行可能不全，以权威详情为准；拉不到就用列表数据兜。
 		if detail, derr := src.GetPosting(ctx, p.PostingNumber); derr == nil && detail != nil {
 			p = *detail
 		} else if derr != nil {
@@ -288,9 +301,12 @@ func (s *Service) HandleSweep(ctx context.Context, _ *asynq.Task) error {
 	now := s.now()
 	swept := 0
 
-	if rows, err := s.repo.TimeoutForPurchase(ctx, now.Add(-TimeoutPurchase)); err != nil {
+	// 超时未采购：允许采购却没推进（new）或采购中卡住。
+	rows, err := s.repo.TimeoutForPurchase(ctx, now.Add(-TimeoutPurchase))
+	if err != nil {
 		logger.Errorf("[order] 扫超时未采购失败: %v", err)
 	} else {
+		s.warnIfCapped("超时未采购", len(rows))
 		for i := range rows {
 			o := &rows[i]
 			detail := fmt.Sprintf("posting=%s status=%s ozon_status=%s 超过 %s 未推进",
@@ -303,9 +319,12 @@ func (s *Service) HandleSweep(ctx context.Context, _ *asynq.Task) error {
 		}
 	}
 
-	if rows, err := s.repo.DeadlineNear(ctx, now.Add(DeadlineHorizon)); err != nil {
+	// 发货截止临近。
+	rows, err = s.repo.DeadlineNear(ctx, now.Add(DeadlineHorizon))
+	if err != nil {
 		logger.Errorf("[order] 扫发货截止临近失败: %v", err)
 	} else {
+		s.warnIfCapped("发货截止临近", len(rows))
 		for i := range rows {
 			o := &rows[i]
 			detail := fmt.Sprintf("posting=%s 发货截止 %s，当前状态 %s",
@@ -318,9 +337,12 @@ func (s *Service) HandleSweep(ctx context.Context, _ *asynq.Task) error {
 		}
 	}
 
-	if rows, err := s.repo.RelayStalled(ctx, now.Add(-RelayStall)); err != nil {
+	// 中转点停滞：签收后长时间没交运。
+	rows, err = s.repo.RelayStalled(ctx, now.Add(-RelayStall))
+	if err != nil {
 		logger.Errorf("[order] 扫中转点停滞失败: %v", err)
 	} else {
+		s.warnIfCapped("中转点停滞", len(rows))
 		for i := range rows {
 			o := &rows[i]
 			detail := fmt.Sprintf("posting=%s 中转点签收后超过 %s 未交运", o.PostingNumber, RelayStall)
@@ -336,6 +358,13 @@ func (s *Service) HandleSweep(ctx context.Context, _ *asynq.Task) error {
 	return nil
 }
 
+// warnIfCapped 命中单轮扫描上限时吭一声（不许静默截断）。
+func (s *Service) warnIfCapped(name string, n int) {
+	if n >= ScanLimit {
+		logger.Warnf("[order] %s 命中扫描上限 %d 条，本轮只处理这些（积压超出单轮能力）", name, ScanLimit)
+	}
+}
+
 // RescanRule 补投规则：停在「允许采购但没动」的订单重新投采购计划
 // （写库与入队不在同一事务，总纲 §5.5）。
 func (s *Service) RescanRule() queue.RescanRule {
@@ -346,6 +375,9 @@ func (s *Service) RescanRule() queue.RescanRule {
 			rows, err := s.repo.StuckForPurchase(ctx, cutoff)
 			if err != nil {
 				return nil, err
+			}
+			if len(rows) >= ScanLimit {
+				logger.Warnf("[order] 采购计划补投命中扫描上限 %d 条", ScanLimit)
 			}
 			tasks := make([]queue.Task, 0, len(rows))
 			for i := range rows {

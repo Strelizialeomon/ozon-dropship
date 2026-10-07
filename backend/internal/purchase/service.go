@@ -89,6 +89,9 @@ func (s *Service) PlanOrder(ctx context.Context, orderID string) error {
 	if o.Status != order.StatusNew {
 		return nil // 已推进过：幂等
 	}
+	if order.IsTerminal(o.Status) {
+		return nil // Ozon 已取消 / 退货：不采购
+	}
 	if !order.RuleFor(o.OzonStatus).AllowedToPurchase {
 		return nil // 平台未放行：等轮询看到 awaiting_packaging 再投
 	}
@@ -270,12 +273,6 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if task.Status != StatusPending && task.Status != StatusExecuting {
-		return nil // 已推进 / 已关单 / 异常：幂等结束
-	}
-	if task.ExecutorType != ExecutorAuto || task.Channel != catalog.ChannelSelfUse {
-		return nil // 人工任务与跨境通道（S2）不走自动执行器
-	}
 	o, err := s.orders.Repo().ByID(ctx, task.OrderID)
 	if errors.Is(err, order.ErrOrderNotFound) {
 		return nil
@@ -283,23 +280,40 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
+
+	// 订单已终结（Ozon 取消 / 退货）：不再下单；还没买货的任务收掉，别让补投每 5 分钟重投（重审 #5）。
+	if order.IsTerminal(o.Status) {
+		return s.closeForTerminalOrder(ctx, task, o)
+	}
+	// 已走完下单的动作：什么都不做（幂等）。写库失败由 retryOrFail 兜，见 recordOrdered。
+	switch task.Status {
+	case StatusOrdered, StatusPaid, StatusShipped, StatusClosed:
+		return nil
+	}
+	if task.ExecutorType != ExecutorAuto || task.Channel != catalog.ChannelSelfUse {
+		return nil // 人工任务与跨境通道（S2）不走自动执行器
+	}
+	if task.Status != StatusPending && task.Status != StatusExecuting && task.Status != StatusException {
+		return nil
+	}
 	pay, perr := task.DecodePayload()
 	if perr != nil {
-		if err := s.repo.SetStatus(ctx, task.ID, StatusException); err != nil {
+		if _, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusPending, StatusExecuting, StatusException}, StatusException); err != nil {
 			logger.Errorf("[purchase] 置异常状态失败 task=%s: %v", task.ID, err)
 		}
 		s.raise(ctx, order.RefPurchaseTask, task.ID, order.CodeAlibabaOrderFailed, "任务载荷损坏: "+perr.Error())
 		return nil
 	}
 
-	// 1) 先落 executing（下单前的第一道防重闸）。
-	if task.Status == StatusPending {
-		ok, err := s.repo.MarkExecuting(ctx, task.ID)
+	// 1) 先落 executing（下单前的第一道防重闸）。CAS：并发下只有一个能过；
+	//    exception 也允许重试（操作台点「执行」要把失败单救回来，重审 #10）。
+	if task.Status != StatusExecuting {
+		ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusPending, StatusException}, StatusExecuting)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return nil // 别的 worker 抢先了
+			return nil // 别的 worker 抢先了 / 状态已变
 		}
 	}
 
@@ -315,7 +329,7 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 		return s.retryOrFail(ctx, task, fmt.Errorf("核对买家订单失败: %w", err))
 	}
 	if found != nil {
-		return s.recordOrdered(ctx, task, found, "核对补记：1688 已有该 posting 的买家订单，不再下单")
+		return s.recordOrdered(ctx, task, found, "核对补记：1688 已有该任务的买家订单，不再下单")
 	}
 
 	// 3) 预览：新商家 / 地址问题在这里分流。
@@ -337,20 +351,21 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 			return s.convertToManual(ctx, task, "新商家首单：1688 买家自用版只能对下过单的老商家下单，自动转人工")
 		case PreviewReasonAddressInvalid:
 			s.raise(ctx, order.RefPurchaseTask, task.ID, order.CodeAddressInvalid, pv.Message)
-			return s.repo.SetStatus(ctx, task.ID, StatusException)
+			_, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusExecuting, StatusPending}, StatusException)
+			return err
 		default:
 			return s.retryOrFail(ctx, task, fmt.Errorf("下单预览未通过: %s", pv.Message))
 		}
 	}
 
-	// 4) 下单。买家留言带 posting_number（中转点认包 + 防重核对都靠它）。
+	// 4) 下单。买家留言带 posting_number + 任务标记（中转点认包用前者、防重核对靠后者）。
 	bo, err := buyer.CreateOrder(ctx, CreateOrderRequest{
 		ItemID:    req.ItemID,
 		SkuID:     req.SkuID,
 		Qty:       req.Qty,
 		UnitPrice: req.UnitPrice,
 		Address:   addr,
-		Remark:    o.PostingNumber,
+		Remark:    TradeRemark(o.PostingNumber, task.ID),
 	})
 	if err != nil {
 		return s.retryOrFail(ctx, task, fmt.Errorf("1688 下单失败: %w", err))
@@ -358,22 +373,75 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 	return s.recordOrdered(ctx, task, bo, "自动下单成功")
 }
 
-// findPlacedOrder 查买家订单里是否已有本 posting 的单（按买家留言里的 posting_number 认）。
+// TradeRemark 下单留言：posting_number（中转点认包）+ 任务标记（区分同一订单的兄弟任务）。
+func TradeRemark(postingNumber, taskID string) string {
+	return fmt.Sprintf("%s#%s", postingNumber, tradeTag(taskID))
+}
+
+// tradeTag 任务标记：一单多任务共用同一个 posting_number，只按 posting 匹配会串号——
+// 兄弟任务的 1688 单被认领后，这条任务的货根本没买（重审 #1）。
+func tradeTag(taskID string) string {
+	if len(taskID) <= 8 {
+		return "T" + taskID
+	}
+	return "T" + taskID[len(taskID)-8:]
+}
+
+// closeForTerminalOrder 订单已取消/退货：还没买东西的任务直接收掉（不用再采），
+// 已经买过的（ordered 及以后）保持原状——那是花过钱的，留给人核。
+func (s *Service) closeForTerminalOrder(ctx context.Context, task *PurchaseTask, o *order.Order) error {
+	switch task.Status {
+	case StatusPending, StatusExecuting:
+		ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusPending, StatusExecuting}, StatusClosed)
+		if err != nil {
+			return err
+		}
+		if ok {
+			s.audit.Record(ctx, audit.Entry{
+				Action: "purchase_task.closed", Object: "purchase_task:" + task.ID,
+				Detail: mustJSON(map[string]string{"order_id": o.ID, "reason": "订单已" + o.Status + "，未采购不再执行"}),
+			})
+			logger.L().Info("purchase task closed for terminal order", "task", task.ID, "order_status", o.Status)
+		}
+	case StatusException:
+		// 异常任务：订单都没了，异常也没意义了 → 收掉。
+		ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusException}, StatusClosed)
+		if err != nil {
+			return err
+		}
+		if ok {
+			s.audit.Record(ctx, audit.Entry{
+				Action: "purchase_task.closed", Object: "purchase_task:" + task.ID,
+				Detail: mustJSON(map[string]string{"order_id": o.ID, "reason": "订单已" + o.Status}),
+			})
+		}
+	}
+	return nil
+}
+
+// findPlacedOrder 查买家订单里是否已有**本任务**的单：
+// 买家留言必须同时含 posting_number 与任务标记——只认 posting 会把兄弟任务的单认领走（重审 #1）。
 func (s *Service) findPlacedOrder(ctx context.Context, buyer BuyerClient, task *PurchaseTask, o *order.Order) (*BuyerOrder, error) {
 	since := task.CreatedAt.Add(-time.Hour) // 往前留一小时余量（时钟与入库延迟）
 	list, err := buyer.ListBuyerOrders(ctx, ListBuyerOrdersRequest{Since: since, To: s.now()})
 	if err != nil {
 		return nil, err
 	}
+	tag := tradeTag(task.ID)
 	for i := range list {
-		if o.PostingNumber != "" && strings.Contains(list[i].Remark, o.PostingNumber) {
+		if o.PostingNumber == "" {
+			continue
+		}
+		if strings.Contains(list[i].Remark, o.PostingNumber) && strings.Contains(list[i].Remark, tag) {
 			return &list[i], nil
 		}
 	}
 	return nil, nil
 }
 
-// recordOrdered 记下单结果：采购单入库 + 任务 ordered + 订单状态回推。
+// recordOrdered 记下单结果：采购单先入库（写失败可重试，状态没动过），
+// 再用 CAS 把任务推到 ordered——若任务已被人工回填推到 shipped，CAS 失败就只记日志，
+// 不把状态打回去（重审 #7）。
 func (s *Service) recordOrdered(ctx context.Context, task *PurchaseTask, bo *BuyerOrder, note string) error {
 	if bo == nil {
 		return s.retryOrFail(ctx, task, errors.New("下单结果为空"))
@@ -386,11 +454,17 @@ func (s *Service) recordOrdered(ctx context.Context, task *PurchaseTask, bo *Buy
 		DomesticCarrier:    nullable(bo.Carrier),
 		DomesticTrackingNo: nullable(bo.TrackingNo),
 	}
-	if err := s.repo.UpsertPurchaseOrder(ctx, po); err != nil {
-		return fmt.Errorf("记采购单失败: %w", err)
+	if err := s.repo.UpsertPurchaseOrder(ctx, po, false); err != nil {
+		// 重试用尽会写异常池，不再让任务永远停在 executing（重审 #14）。
+		return s.retryOrFail(ctx, task, fmt.Errorf("记采购单失败: %w", err))
 	}
-	if err := s.repo.SetStatus(ctx, task.ID, StatusOrdered); err != nil {
+	ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusPending, StatusExecuting}, StatusOrdered)
+	if err != nil {
 		return err
+	}
+	if !ok {
+		logger.Warnf("[purchase] 任务 %s 在下单返回后已被推进到其它状态，采购单已写入但不改状态", task.ID)
+		return nil
 	}
 	s.syncOrderStatus(ctx, task.OrderID)
 	s.audit.Record(ctx, audit.Entry{
@@ -486,7 +560,9 @@ func (s *Service) HandleClose(ctx context.Context, t *asynq.Task) error {
 	return s.CloseOrder(ctx, payload.OrderID)
 }
 
-// CloseOrder 订单已签收（at_relay 及以后）→ 该订单的采购任务关单（总纲 §5.1 状态机终点）。
+// CloseOrder 订单走到终结 → 收掉该订单的采购任务（总纲 §5.1 状态机终点）：
+// 签收完成（at_relay 及以后）收掉 ordered/paid/shipped；取消 / 退货只收还没买东西的
+// （pending/executing）——已买过的留着给人核（重审 #5）。
 func (s *Service) CloseOrder(ctx context.Context, orderID string) error {
 	o, err := s.orders.Repo().ByID(ctx, orderID)
 	if errors.Is(err, order.ErrOrderNotFound) {
@@ -495,26 +571,37 @@ func (s *Service) CloseOrder(ctx context.Context, orderID string) error {
 	if err != nil {
 		return err
 	}
-	if order.Rank(o.Status) < order.Rank(order.StatusAtRelay) {
-		return nil // 还没签收：等补投扫描下轮再看
+	var closable []string
+	reason := ""
+	switch {
+	case order.IsTerminal(o.Status):
+		closable = []string{StatusPending, StatusExecuting}
+		reason = "订单已" + o.Status + "，未采购不再执行"
+	case order.Rank(o.Status) >= order.Rank(order.StatusAtRelay):
+		closable = []string{StatusOrdered, StatusPaid, StatusShipped}
+		reason = "中转点已签收"
+	default:
+		return nil // 还没到该收的时候：等补投扫描下轮再看
 	}
+
 	tasks, err := s.repo.TasksByOrder(ctx, orderID)
 	if err != nil {
 		return err
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		switch task.Status {
-		case StatusOrdered, StatusPaid, StatusShipped:
-			if err := s.repo.SetStatus(ctx, task.ID, StatusClosed); err != nil {
-				logger.Errorf("[purchase] 关单失败 task=%s: %v", task.ID, err)
-				continue
-			}
-			s.audit.Record(ctx, audit.Entry{
-				Action: "purchase_task.closed", Object: "purchase_task:" + task.ID,
-				Detail: mustJSON(map[string]string{"order_id": orderID, "reason": "中转点已签收"}),
-			})
+		ok, err := s.repo.SetStatusFrom(ctx, task.ID, closable, StatusClosed)
+		if err != nil {
+			logger.Errorf("[purchase] 关单失败 task=%s: %v", task.ID, err)
+			continue
 		}
+		if !ok {
+			continue // 状态已被别的动作改走
+		}
+		s.audit.Record(ctx, audit.Entry{
+			Action: "purchase_task.closed", Object: "purchase_task:" + task.ID,
+			Detail: mustJSON(map[string]string{"order_id": orderID, "reason": reason, "from": task.Status}),
+		})
 	}
 	s.syncOrderStatus(ctx, orderID)
 	return nil
@@ -559,20 +646,47 @@ func (s *Service) syncOrderStatus(ctx context.Context, orderID string) {
 }
 
 // HandleSweep 国内段停滞扫描（定时任务入口）。
+// 口径（总纲 §5.2 / 子 spec §6「下单后 72 小时国内段无物流更新」）：ordered / paid / shipped
+// 三种都算——卖家一直没发货（停在 ordered/paid）同样是「国内段没有动静」（重审 #5）。
 func (s *Service) HandleSweep(ctx context.Context, _ *asynq.Task) error {
-	rows, err := s.repo.TasksForRescan(ctx, []string{StatusShipped}, s.now().Add(-DomesticStall))
+	rows, err := s.repo.TasksForRescan(ctx,
+		[]string{StatusOrdered, StatusPaid, StatusShipped}, s.now().Add(-DomesticStall))
 	if err != nil {
 		return fmt.Errorf("扫国内段停滞失败: %w", err)
 	}
+	if len(rows) >= order.ScanLimit {
+		logger.Warnf("[purchase] 国内段停滞命中扫描上限 %d 条，本轮只处理这些", order.ScanLimit)
+	}
 	for i := range rows {
 		task := &rows[i]
-		detail := fmt.Sprintf("采购任务 %s 已发国内段超过 %s 无更新", task.ID, DomesticStall)
+		detail := fmt.Sprintf("采购任务 %s（%s）下单后超过 %s 国内段无更新", task.ID, task.Status, DomesticStall)
 		if err := s.raiseErr(ctx, order.RefPurchaseTask, task.ID, order.CodeDomesticStalled, detail); err != nil {
 			logger.Errorf("[purchase] 写国内段停滞异常失败 task=%s: %v", task.ID, err)
 		}
 	}
 	logger.L().Info("purchase sweep done", "stalled", len(rows))
 	return nil
+}
+
+// TriggerExecute 操作台「执行」入口：可执行才投递，不可执行要明确报错——
+// 别对 exception 任务回一句「已投递」然后什么都不发生（重审 #10）。
+func (s *Service) TriggerExecute(ctx context.Context, taskID string) error {
+	task, err := s.repo.TaskByID(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.ExecutorType != ExecutorAuto || task.Channel != catalog.ChannelSelfUse {
+		return errors.New("人工任务不能自动执行：走备料单 → 回填")
+	}
+	switch task.Status {
+	case StatusPending, StatusExecuting, StatusException:
+	default:
+		return fmt.Errorf("任务当前是「%s」，不能执行", task.Status)
+	}
+	if s.q == nil {
+		return errors.New("队列未装配")
+	}
+	return s.q.Enqueue(ctx, ExecuteTask(task.ID))
 }
 
 // RescanRules 补投规则（总纲 §5.5：写库与入队不同事务的兜底）。
