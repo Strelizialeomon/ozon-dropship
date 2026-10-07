@@ -1,0 +1,4 @@
+[test]
+# bun test 默认没有 DOM；happy-dom 注册进全局后
+# @testing-library/react 才能挂载真实节点（照 xhs-analysis 的用法）。
+preload = ["./test-setup.ts"]

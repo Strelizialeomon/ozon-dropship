@@ -1,8 +1,8 @@
 # spec-s1e-console —— S1-E 前端操作台（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-E**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：S1-A 合并后可开工；与 D 并行开发，**须在 D 之后合并**
-> 跨份验收与协作声明：S1 父 issue（待开）
+> Issue: [#10](https://github.com/Strelizialeomon/ozon-dropship/issues/10) ｜ 状态：v1.0（2026-10-07）｜ 发布序：S1-A 合并后可开工；与 D 并行开发，**须在 D 之后合并**
+> 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
 
 ## 1. 管什么 / 不管什么
 
