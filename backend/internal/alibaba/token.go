@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/logger"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/ratelimit"
 )
 
@@ -23,7 +24,8 @@ const (
 )
 
 // CredentialStore 本包用到的凭据读写能力（只碰企业级凭据，storeID 固定空串）。
-// 方法签名与 S1-A store.CredentialService 的 Get/Put/SetExpiry 对齐；
+// 方法与 S1-A store.CredentialService 的 Get/Put/SetExpiry 一一对应、形状对齐
+// （Get/Put 的返回值按本包所需拆开：载荷 + 到期时间，不引用 store 的类型）；
 // 装配层在 cmd/api 用一个小适配器接上（本包不 import store，守包依赖 ADR）。
 type CredentialStore interface {
 	// Get 读明文载荷（storeID 空串 = 企业级凭据），返回载荷与到期时间。
@@ -91,6 +93,9 @@ const (
 	defaultAccessTokenTTL = 10 * time.Hour
 	// appCredsTTL 应用密钥的内存缓存时长（轮换后不用重启进程，最多 10 分钟生效）。
 	appCredsTTL = 10 * time.Minute
+	// refreshFailureCooldown 续期失败后的冷却窗口：窗口内所有调用直接拿到同一个
+	// TokenError（可识别），不再各自打一轮网关。
+	refreshFailureCooldown = 30 * time.Second
 )
 
 // tokenCredential 一次续期的结果。
@@ -104,8 +109,11 @@ type tokenCredential struct {
 }
 
 // tokenManager 凭据与 token 的内存缓存 + 自动续期。
-// 并发安全：整个续期流程在一把锁里（续期很稀有，不值得做更细的并发控制；
-// 顺带天然单飞——并发调用只会触发一次续期）。
+//
+// 并发安全与单飞：整个续期流程在一把锁里——成功时结果进缓存，后续调用直接命中；
+// 失败时错误进「冷却窗口」（refreshFailureCooldown），窗口内的调用直接拿到同一个
+// TokenError，不各自再打一轮网关（否则并发 N 个任务碰上游抽风 = N 次 getToken，
+// 且每次还串行堵在锁上）。
 type tokenManager struct {
 	client *Client
 	creds  CredentialStore
@@ -115,9 +123,21 @@ type tokenManager struct {
 	accessToken string
 	// accessExpiresAt 本地估算的 access_token 失效时刻。
 	accessExpiresAt time.Time
+	// lastRefreshErr / refreshFailUntil 续期失败后的冷却窗口（见上）。
+	lastRefreshErr   error
+	refreshFailUntil time.Time
 
 	appMu sync.Mutex
 	app   appCredentials
+}
+
+// invalidate 清掉 token 内存缓存：鉴权失败（token 被轮换/作废）时调用，
+// 下一次调用会重读凭据并续期，而不是干等到本地估算的到期时刻。
+func (m *tokenManager) invalidate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accessToken = ""
+	m.accessExpiresAt = time.Time{}
 }
 
 type appCredentials struct {
@@ -157,6 +177,10 @@ func (m *tokenManager) token(ctx context.Context) (string, error) {
 	if m.accessToken != "" && m.now().Add(tokenFreshMargin).Before(m.accessExpiresAt) {
 		return m.accessToken, nil
 	}
+	// 续期刚失败过：冷却窗口内直接返回同一错误，不再打网关（防并发放大 + 快速失败）。
+	if m.lastRefreshErr != nil && m.now().Before(m.refreshFailUntil) {
+		return "", m.lastRefreshErr
+	}
 
 	appKey, appSecret, err := m.appCreds(ctx)
 	if err != nil {
@@ -181,14 +205,23 @@ func (m *tokenManager) token(ctx context.Context) (string, error) {
 
 	cred, err := m.refresh(ctx, appKey, appSecret, refresh)
 	if err != nil {
-		return "", &TokenError{Op: "refresh", Reauth: isReauthCode(Code(err)), Message: "1688 token 续期失败", Err: err}
+		te := &TokenError{Op: "refresh", Reauth: isReauthCode(Code(err)), Message: "1688 token 续期失败", Err: err}
+		m.lastRefreshErr = te
+		m.refreshFailUntil = m.now().Add(refreshFailureCooldown)
+		return "", te
 	}
-	if err := m.save(ctx, cred, refresh); err != nil {
-		return "", err
+
+	// 回写失败不是「续期失败」：新 token 已经换到手，先保住内存里这份继续用。
+	// 丢掉它才是灾难——响应若轮换了 refresh_token，旧的那份已被上游作废，
+	// 丢掉新的会导致后续所有调用 invalid_grant、只能人工重新授权。
+	if saveErr := m.save(ctx, cred, refresh); saveErr != nil {
+		logger.Warnf("[alibaba] 1688 token 已续期但回写失败（本次继续用内存里的新 token，下次续期再试回写）: %v", saveErr)
 	}
 
 	m.accessToken = cred.accessToken
 	m.accessExpiresAt = m.now().Add(cred.accessTokenTTL)
+	m.lastRefreshErr = nil
+	m.refreshFailUntil = time.Time{}
 	return cred.accessToken, nil
 }
 

@@ -2,6 +2,8 @@ package alibaba
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -78,11 +80,11 @@ type OrderPreview struct {
 
 // PreviewCargo 预览里一条商品的算价（单位：分）。
 type PreviewCargo struct {
-	OfferID        uint64 `json:"offerId"`
-	SpecID         string `json:"specId"`
-	SKUID          int64  `json:"skuId"`
-	Amount         int64  `json:"amount"`
-	FinalUnitPrice int64  `json:"finalUnitPrice"`
+	OfferID        uint64     `json:"offerId"`
+	SpecID         string     `json:"specId"`
+	SKUID          FlexString `json:"skuId"`
+	Amount         int64      `json:"amount"`
+	FinalUnitPrice int64      `json:"finalUnitPrice"`
 }
 
 // CreateOrderRequest 下单请求（alibaba.trade.fastCreateOrder，买家自用版通道一）。
@@ -95,25 +97,29 @@ type CreateOrderRequest struct {
 	Message string
 	// Flow 下单通道；空 = general。
 	Flow string
-	// OutOrderID 外部订单号（幂等，可选）。
+	// OutOrderID 外部订单号（幂等，可选）。下单失败但可能已执行时，调用方靠它/查单核对后
+	// 再决定是否重发；建议 S1-D 恒定传入。
 	OutOrderID string
 }
 
 // CreateOrderResult 下单结果。
 type CreateOrderResult struct {
 	// OrderID 下单成功后的 1688 订单 id。
-	OrderID flexString `json:"orderId"`
+	OrderID FlexString `json:"orderId"`
 	// TotalSuccessAmount 订单总金额，单位：分。
 	TotalSuccessAmount int64 `json:"totalSuccessAmount"`
 	// PostFee 原始运费，单位：分（下单后卖家可能调整，不等于最终支付运费）。
 	PostFee int64 `json:"postFee"`
-	// FailedOfferList 部分商品下单失败的信息（整体 success 为 true、但个别商品失败时出现）。
-	FailedOfferList *FailedOfferInfo `json:"failedOfferList"`
+	// FailedOfferList 部分商品下单失败的信息（官方类型 offer[]；整体 success 仍为 true 时出现）。
+	FailedOfferList []FailedOffer `json:"failedOfferList"`
 }
 
-// FailedOfferInfo 部分商品失败信息。
-type FailedOfferInfo struct {
-	ErrorMessage string `json:"errorMessage"`
+// FailedOffer 下单失败的一条商品（failedOfferList 的元素）。
+type FailedOffer struct {
+	OfferID      FlexString `json:"offerId"`
+	SpecID       string     `json:"specId"`
+	ErrorCode    string     `json:"errorCode"`
+	ErrorMessage string     `json:"errorMessage"`
 }
 
 // Order 订单详情/列表里的一条订单（官方 TradeInfo；只建 S1 用得到 + 常见的域）。
@@ -124,11 +130,23 @@ type Order struct {
 	NativeLogistics *NativeLogistics   `json:"nativeLogistics"` // 国内物流
 }
 
+// PaidAmount 实付金额（元）= 各期付款额（tradeTerms[].phasAmount）之和。
+// S1 单期付款时等于 totalAmount；分期交易必须累加 tradeTerms，别只看单条。
+// （totalAmount 是「应付款总金额」，两者口径不同；S1-D 记账取这个。）
+func (o *Order) PaidAmount() decimal.Decimal {
+	sum := decimal.Zero
+	for _, t := range o.TradeTerms {
+		sum = sum.Add(t.PhasAmount)
+	}
+	return sum
+}
+
 // OrderBaseInfo 订单基础信息（金额单位：除注明外为元）。
 type OrderBaseInfo struct {
-	// ID / IDOfStr 交易 id（id 是数字、idOfStr 是字符串版；都用字符串语义防精度问题）。
-	ID      int64      `json:"id"`
-	IDOfStr flexString `json:"idOfStr"`
+	// ID / IDOfStr 交易 id（字符串语义：官方文档也说用 idOfStr 处理，防 JS/PHP 精度问题；
+	// 本包统一用 FlexString，不受 int64 上限约束）。
+	ID      FlexString `json:"id"`
+	IDOfStr FlexString `json:"idOfStr"`
 	// Status 交易状态：waitbuyerpay / waitsellersend / waitbuyerreceive / confirm_goods / cancel ...
 	Status string `json:"status"`
 	// BusinessType 业务类型：cn(普通) / ws(大额批发) / yp(拿样) / yf(分销) ...
@@ -195,11 +213,11 @@ type ReceiverInfo struct {
 // OrderProductItem 订单里的一条商品明细（金额单位：除注明外为元）。
 type OrderProductItem struct {
 	// ProductID 商品 id（offerId）；SpecID / SKUID 规格；SubItemID 子订单号。
-	ProductID       int64           `json:"productID"`
+	ProductID       FlexString      `json:"productID"`
 	SpecID          string          `json:"specId"`
-	SKUID           int64           `json:"skuID"`
-	SubItemID       int64           `json:"subItemID"`
-	SubItemIDStr    flexString      `json:"subItemIDString"`
+	SKUID           FlexString      `json:"skuID"`
+	SubItemID       FlexString      `json:"subItemID"`
+	SubItemIDStr    FlexString      `json:"subItemIDString"`
 	Name            string          `json:"name"`
 	Price           decimal.Decimal `json:"price"`           // 原始单价（元）
 	ItemAmount      decimal.Decimal `json:"itemAmount"`      // 实付金额（元）
@@ -239,7 +257,7 @@ type TradeTerm struct {
 	PayWay     string          `json:"payWay"`
 	PayWayDesc string          `json:"payWayDesc"`
 	PhasAmount decimal.Decimal `json:"phasAmount"` // 付款额（元）
-	Phase      int64           `json:"phase"`      // 阶段单 id
+	Phase      FlexString      `json:"phase"`      // 阶段单 id
 }
 
 // NativeLogistics 订单里的国内物流域（nativeLogistics）。
@@ -260,17 +278,17 @@ type NativeLogistics struct {
 
 // NativeLogisticsItem 国内物流运单明细。
 type NativeLogisticsItem struct {
-	ID              int64    `json:"id"`
-	LogisticsCode   string   `json:"logisticsCode"`
-	LogisticsBillNo string   `json:"logisticsBillNo"` // 运单号（如卖家已发货）
-	Status          string   `json:"status"`
-	Type            string   `json:"type"`
-	FromPhone       string   `json:"fromPhone"`
-	FromMobile      string   `json:"fromMobile"`
-	SubItemIDs      string   `json:"subItemIds"`
-	GmtCreate       FlexTime `json:"gmtCreate"`
-	GmtModified     FlexTime `json:"gmtModified"`
-	DeliveredTime   FlexTime `json:"deliveredTime"`
+	ID              FlexString `json:"id"`
+	LogisticsCode   string     `json:"logisticsCode"`
+	LogisticsBillNo string     `json:"logisticsBillNo"` // 运单号（如卖家已发货）
+	Status          string     `json:"status"`
+	Type            string     `json:"type"`
+	FromPhone       string     `json:"fromPhone"`
+	FromMobile      string     `json:"fromMobile"`
+	SubItemIDs      string     `json:"subItemIds"`
+	GmtCreate       FlexTime   `json:"gmtCreate"`
+	GmtModified     FlexTime   `json:"gmtModified"`
+	DeliveredTime   FlexTime   `json:"deliveredTime"`
 }
 
 // ListBuyerOrdersRequest 买家订单列表查询（下单防重核对用：按时间窗拉）。
@@ -315,7 +333,7 @@ func (c *Client) PreviewOrder(ctx context.Context, req PreviewOrderRequest) (*Pr
 	}
 
 	var out PreviewOrderResult
-	err := c.do(ctx, apiPreview, params, true, func(body []byte) error {
+	err := c.do(ctx, apiPreview, params, true, false, func(body []byte) error {
 		var raw struct {
 			statusFields
 			OrderPreviews          []OrderPreview `json:"orderPreviewResuslt"`
@@ -326,7 +344,7 @@ func (c *Client) PreviewOrder(ctx context.Context, req PreviewOrderRequest) (*Pr
 			return err
 		}
 		if ae := raw.err(apiPreview.name); ae != nil {
-			return fail(ae)
+			return c.fail(ae)
 		}
 		if len(raw.OrderPreviews) == 0 {
 			return badResponse(apiPreview, "响应缺 orderPreviewResuslt", body)
@@ -345,7 +363,13 @@ func (c *Client) PreviewOrder(ctx context.Context, req PreviewOrderRequest) (*Pr
 }
 
 // CreateOrder 下单（alibaba.trade.fastCreateOrder，买家自用版）。
-// 注意：下单只创建订单，不含付款；付款由人工在 1688 完成（S1 双轨，总纲 §9·S1）。
+// 注意：
+//   - 下单只创建订单，不含付款；付款由人工在 1688 完成（S1 双轨，总纲 §9·S1）；
+//   - 本方法**不做盲目重试**：5xx、超时、响应解不出来都可能是「订单已建、回包丢了」，
+//     这类失败直接上抛；调用方（S1-D 的防重流程）核对后再决定补记还是重发。
+//     只有确定被拒、没执行的失败（429/超限）才会在内部重试。
+//   - 部分商品可能失败（result.failedOfferList 非空、整体 success 仍为 true）——
+//     调用方要检查这个列表。
 func (c *Client) CreateOrder(ctx context.Context, req CreateOrderRequest) (*CreateOrderResult, error) {
 	params := map[string]any{
 		"addressParam":   req.Address,
@@ -360,7 +384,7 @@ func (c *Client) CreateOrder(ctx context.Context, req CreateOrderRequest) (*Crea
 	}
 
 	var out CreateOrderResult
-	err := c.do(ctx, apiFastCreateOrder, params, true, func(body []byte) error {
+	err := c.do(ctx, apiFastCreateOrder, params, true, true, func(body []byte) error {
 		var raw struct {
 			statusFields
 			Result *CreateOrderResult `json:"result"`
@@ -369,7 +393,7 @@ func (c *Client) CreateOrder(ctx context.Context, req CreateOrderRequest) (*Crea
 			return err
 		}
 		if ae := raw.err(apiFastCreateOrder.name); ae != nil {
-			return fail(ae)
+			return c.fail(ae)
 		}
 		if raw.Result == nil || raw.Result.OrderID == "" {
 			return badResponse(apiFastCreateOrder, "响应缺 result.orderId", body)
@@ -392,7 +416,7 @@ func (c *Client) GetOrder(ctx context.Context, orderID uint64) (*Order, error) {
 	}
 
 	var out Order
-	err := c.do(ctx, apiGetBuyerView, params, true, func(body []byte) error {
+	err := c.do(ctx, apiGetBuyerView, params, true, false, func(body []byte) error {
 		var raw struct {
 			statusFields
 			Result *Order `json:"result"`
@@ -401,7 +425,7 @@ func (c *Client) GetOrder(ctx context.Context, orderID uint64) (*Order, error) {
 			return err
 		}
 		if ae := raw.err(apiGetBuyerView.name); ae != nil {
-			return fail(ae)
+			return c.fail(ae)
 		}
 		if raw.Result == nil {
 			return badResponse(apiGetBuyerView, "响应缺 result", body)
@@ -448,19 +472,28 @@ func (c *Client) ListBuyerOrders(ctx context.Context, req ListBuyerOrdersRequest
 	}
 
 	var out BuyerOrderList
-	err := c.do(ctx, apiGetBuyerOrderList, params, true, func(body []byte) error {
+	err := c.do(ctx, apiGetBuyerOrderList, params, true, false, func(body []byte) error {
 		var raw struct {
 			statusFields
-			Result      []Order `json:"result"`
-			TotalRecord int64   `json:"totalRecord"`
+			// Result 用 RawMessage 先接住：「result 键缺了/null」和「查无订单（result: []）」
+			// 必须区分——下游是下单防重核对，把响应形状漂移读成「没下过单」会导致重复下单。
+			Result      json.RawMessage `json:"result"`
+			TotalRecord int64           `json:"totalRecord"`
 		}
 		if err := unmarshalBody(apiGetBuyerOrderList, body, &raw); err != nil {
 			return err
 		}
 		if ae := raw.err(apiGetBuyerOrderList.name); ae != nil {
-			return fail(ae)
+			return c.fail(ae)
 		}
-		out = BuyerOrderList{Orders: raw.Result, TotalRecord: raw.TotalRecord}
+		if len(raw.Result) == 0 || string(raw.Result) == "null" {
+			return badResponse(apiGetBuyerOrderList, "响应缺 result（形状漂移，不能当作「查无订单」）", body)
+		}
+		var orders []Order
+		if err := json.Unmarshal(raw.Result, &orders); err != nil {
+			return fmt.Errorf("alibaba %s: 解 result 失败: %w", apiGetBuyerOrderList.name, err)
+		}
+		out = BuyerOrderList{Orders: orders, TotalRecord: raw.TotalRecord}
 		return nil
 	})
 	if err != nil {

@@ -152,6 +152,26 @@ func TestSignProperties(t *testing.T) {
 	}
 }
 
+// TestSignPrefixKeyPair page/pageSize 是真实存在的「前缀键对」：本项目按官方文档口径
+// 按参数名排序，官方 Java SDK 排的是拼接串——对数字页码两种排法必须一致（重审发现项）。
+func TestSignPrefixKeyPair(t *testing.T) {
+	const (
+		path   = "param2/1/com.alibaba.trade/alibaba.trade.getBuyerOrderList/1234567"
+		secret = "s3cret"
+	)
+	for _, page := range []string{"1", "9", "50", "999999"} {
+		// 前提：按拼接串排序时 "page"+页码 必须仍排在 "pageSize"+值 前面（数字首字符 < 'S'）。
+		if "page"+page >= "pageSize50" {
+			t.Fatalf("page=%s：拼接串排序会分叉，按名排序的前提不成立", page)
+		}
+		params := map[string]string{"page": page, "pageSize": "50"}
+		want := hmacSha1Hex(path+"page"+page+"pageSize50", secret)
+		if got := sign(path, secret, params); got != want {
+			t.Fatalf("page=%s：按名排序结果与预期不符\n got: %s\nwant: %s", page, got, want)
+		}
+	}
+}
+
 // TestSignPath 签名路径拼装。
 func TestSignPath(t *testing.T) {
 	got := signPath(1, "com.alibaba.trade", "alibaba.trade.fastCreateOrder", "1234567")

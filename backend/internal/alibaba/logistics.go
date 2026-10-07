@@ -81,8 +81,8 @@ type LogisticsSender struct {
 type LogisticsTrace struct {
 	// LogisticsID 物流编号（如 BX110096003841234）。
 	LogisticsID string `json:"logisticsId"`
-	// OrderID 订单编号。
-	OrderID int64 `json:"orderId"`
+	// OrderID 订单编号（大整数 id，字符串语义保全）。
+	OrderID FlexString `json:"orderId"`
 	// LogisticsBillNo 物流单号（快递面单号）。
 	LogisticsBillNo string `json:"logisticsBillNo"`
 	// Steps 轨迹步骤（时间正序）。
@@ -96,15 +96,23 @@ type LogisticsStep struct {
 }
 
 // GetLogistics 取买家视角物流：Infos 给单号/状态/公司，Traces 给轨迹。
-// 卖家未发货时 Traces 为空（1688 文档明确的正常返回，不报错）；
-// Infos 调用失败则返回错误（订单不存在、无权限等）。
+//
+// 失败语义（两个子调用任一失败都整体报错，不返回「部分成功」的结果）：
+//   - Infos 调用失败（订单不存在、无权限等）→ 返回错误；
+//   - 轨迹调用失败 → 同样返回错误，调用方重试整次调用。
+//     唯一例外是「没有物流跟踪信息」（卖家未发货的正常状态，官方文档 code 404 /
+//     样例 errorMessage 文案）——翻成空 Traces、不报错。
+//
+// 这么选的原因：单号在 Infos 里、轨迹在 Trace 里，调用方（S1-D 回填国内快递号）
+// 要的是两者的完整视图；吞掉一半再悄悄返回会让「轨迹查不到」和「轨迹还没生成」
+// 在下游分不开。
 func (c *Client) GetLogistics(ctx context.Context, orderID uint64) (*Logistics, error) {
 	out := &Logistics{}
 
 	err := c.do(ctx, apiLogisticsInfos, map[string]any{
 		"webSite": "1688",
 		"orderId": strconv.FormatUint(orderID, 10),
-	}, true, func(body []byte) error {
+	}, true, false, func(body []byte) error {
 		var raw struct {
 			statusFields
 			Result []LogisticsInfo `json:"result"`
@@ -113,7 +121,7 @@ func (c *Client) GetLogistics(ctx context.Context, orderID uint64) (*Logistics, 
 			return err
 		}
 		if ae := raw.err(apiLogisticsInfos.name); ae != nil {
-			return fail(ae)
+			return c.fail(ae)
 		}
 		out.Infos = raw.Result
 		return nil
@@ -125,7 +133,7 @@ func (c *Client) GetLogistics(ctx context.Context, orderID uint64) (*Logistics, 
 	err = c.do(ctx, apiLogisticsTrace, map[string]any{
 		"webSite": "1688",
 		"orderId": strconv.FormatUint(orderID, 10),
-	}, true, func(body []byte) error {
+	}, true, false, func(body []byte) error {
 		var raw struct {
 			statusFields
 			Traces []LogisticsTrace `json:"logisticsTrace"`
@@ -139,7 +147,7 @@ func (c *Client) GetLogistics(ctx context.Context, orderID uint64) (*Logistics, 
 			if isNoTrace(ae) {
 				return nil
 			}
-			return fail(ae)
+			return c.fail(ae)
 		}
 		out.Traces = raw.Traces
 		return nil
@@ -151,7 +159,9 @@ func (c *Client) GetLogistics(ctx context.Context, orderID uint64) (*Logistics, 
 }
 
 // isNoTrace 判断错误是否为「还没有物流跟踪信息」。
-// 依据：官方文档错误码 404 + 出参示例的 errorMessage 文案（"该订单没有物流跟踪信息。"）。
+// 依据：官方文档错误码列表里 404 = 物流信息不存在；出参示例给 errorMessage 文案
+// （"该订单没有物流跟踪信息。"）。物流轨迹接口的 404 按此口径理解——如果真机上发现
+// 404 还承载别的语义（如订单不存在），按实测结论收窄这里的判断。
 func isNoTrace(ae *APIError) bool {
 	if strings.EqualFold(ae.Code, "404") {
 		return true

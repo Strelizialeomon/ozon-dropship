@@ -32,9 +32,12 @@ func signPath(version int, namespace, name, appKey string) string {
 // 规则（官方签名口径，三个独立实现一致）：
 //  1. 除 _aop_signature 自身外，所有实际发送的参数都参与（含 access_token、_aop_timestamp）；
 //  2. 参数按名称 ASCII 升序排序。
-//     注：官方 Java SDK 的实现里排的是「参数名+参数值」拼接串——两种排法仅在
-//     「某个参数名是另一个参数名的前缀」时结果不同，本包发送的参数集不会出现这种键，
-//     故完全等价；这里按官方文档原文（按参数名排序）实现。
+//     注：官方 Java SDK 的实现里排的是「参数名+参数值」拼接串——两种排法只在
+//     「某个参数名是另一个的前缀」时可能分叉。本包真实存在这种键对：page / pageSize
+//     （订单列表接口）。对它们，拼接串比较落在 page 值首字符 vs "Size" 首字符 'S' 上：
+//     数字开头的页码（0x30–0x39）恒小于 'S'，两种排法结果一致（sign_test 钉住）。
+//     若将来给这类前缀键传以字母（尤其 ≥'S'）开头的值，两种排法会分叉——网关按哪种
+//     排尚未实测【未验】，届时要拿真机签名核对后再动这里。
 //  3. 直接拼接 key+value 原文（不做 URL 编码、不加分隔符），前面接签名路径；
 //  4. 用 appSecret 做 HMAC-SHA1，输出大写十六进制（小写会被网关拒绝）。
 func sign(path, appSecret string, params map[string]string) string {

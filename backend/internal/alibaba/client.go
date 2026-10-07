@@ -112,14 +112,37 @@ var (
 //
 // handle 拿到响应体后做「解错误 → 解载荷」：业务拒绝要包一层 ratelimit.Permanent
 // （不重试），超限错误包 ratelimit.RateLimitedError（退避重试），见 errors.go 的 fail()。
-func (c *Client) do(ctx context.Context, a api, params map[string]any, auth bool, handle func(body []byte) error) error {
+//
+// retryUnsafe = 该调用「可能已经在对方落地」（非幂等的下单）：凡失败原因无法确定请求
+// 没被执行（5xx、超时、响应解不出来），一律不再重试——盲重试会重复下单。只有「确定
+// 被拒、没执行」的失败（限流 429/超限被拒）才重试。重试决策权交回调用方（S1-D 的
+// 防重流程：先查买家订单再决定补记还是重发）。
+func (c *Client) do(ctx context.Context, a api, params map[string]any, auth bool, retryUnsafe bool, handle func(body []byte) error) error {
 	return c.registry.Do(ctx, ratelimit.ScopeAlibaba, subjectApp, a.name, func(ctx context.Context) error {
 		body, err := c.post(ctx, a, params, auth)
 		if err != nil {
+			if retryUnsafe && !isRateLimited(err) {
+				return ratelimit.Permanent(err)
+			}
 			return err
 		}
-		return handle(body)
+		err = handle(body)
+		if retryUnsafe && err != nil && !isPermanent(err) && !isRateLimited(err) {
+			// 解包失败同样可能是「订单已建、回包烂」：不再重试。
+			return ratelimit.Permanent(err)
+		}
+		return err
 	})
+}
+
+// fail 同包级 fail()，另对「鉴权失败」类错误顺手清掉 token 内存缓存：
+// token 被上游轮换/作废时，下一次调用会重读凭据并续期，而不是干等到本地估算的到期时刻
+// （否则最长会拿旧 token 撞到快到期前 10 分钟才自愈）。
+func (c *Client) fail(ae *APIError) error {
+	if isAuthCode(ae.Code) {
+		c.tokens.invalidate()
+	}
+	return fail(ae)
 }
 
 // post 组装参数（取凭据 → 签名）并发一次 POST，把 HTTP 层失败翻译成重试语义。

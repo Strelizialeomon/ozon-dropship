@@ -82,10 +82,11 @@ func (b *flexBool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// flexString 兼容「文档标 String、实际返回数字」的 id 字段（如 idOfStr、subItemIDString）。
-type flexString string
+// FlexString 兼容「文档标 String、实际返回数字」的 id 字段（如 idOfStr、subItemIDString）。
+// 订单号一类的大整数 id 也统一用它：数字原样保留文本，不经 float64、不受 int64 上限约束。
+type FlexString string
 
-func (s *flexString) UnmarshalJSON(data []byte) error {
+func (s *FlexString) UnmarshalJSON(data []byte) error {
 	raw := strings.TrimSpace(string(data))
 	if raw == "null" {
 		*s = ""
@@ -96,15 +97,15 @@ func (s *flexString) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(data, &v); err != nil {
 			return err
 		}
-		*s = flexString(v)
+		*s = FlexString(v)
 		return nil
 	}
-	*s = flexString(raw) // 数字原样保留（id 可能超出 float64 精度，不许经手浮点）
+	*s = FlexString(raw) // 数字原样保留（id 可能超出 float64 精度，不许经手浮点）
 	return nil
 }
 
 // String 取字符串值。
-func (s flexString) String() string { return string(s) }
+func (s FlexString) String() string { return string(s) }
 
 // FlexTime 1688 的时间字段格式不统一，见过这些：
 //   - "20170913231916000-0700"（yyyyMMddHHmmssSSS±ZZZZ，订单时间）
@@ -186,6 +187,17 @@ func (s statusFields) message() string {
 	return ""
 }
 
+// okCodes 成功码口径：code/errorCode 等于这些值（大小写不敏感）不算错误。
+// 来源：社区实现（Natawat-d/1688_Platform 的 okCode）对真实网关的归纳；【未验】。
+// 不设这层，`{"success":true,"code":"0","message":"成功"}` 这类成功信封会被误判成失败。
+var okCodes = map[string]bool{
+	"": true, "0": true, "200": true, "s0000": true, "success": true,
+}
+
+func okCode(code string) bool {
+	return okCodes[strings.ToLower(code)]
+}
+
 // err 按成功/失败字段判断；失败返回 *APIError，成功返回 nil。
 // hasResult=false（连结果字段都没有时）由各调用点单独判断，不在这里兜。
 func (s statusFields) err(apiName string) *APIError {
@@ -193,11 +205,12 @@ func (s statusFields) err(apiName string) *APIError {
 	if s.Success.Valid && !s.Success.Value {
 		return &APIError{API: apiName, Code: firstNonEmpty(code, "FAILED"), Message: s.message()}
 	}
-	if code != "" {
+	if code != "" && !okCode(code) {
 		return &APIError{API: apiName, Code: code, Message: s.message()}
 	}
-	// 没有 success 字段、但有错误文案、且没错误码：按失败处理（订单列表这类接口的失败形态）。
-	if !s.Success.Valid && s.message() != "" {
+	// 没有 success 字段、没有（有效的）错误码、但有错误文案：按失败处理
+	// （订单列表这类接口的失败形态）。注意排除 code 为成功码（"0"/"200"）的响应。
+	if !s.Success.Valid && code == "" && s.message() != "" {
 		return &APIError{API: apiName, Code: "FAILED", Message: s.message()}
 	}
 	return nil

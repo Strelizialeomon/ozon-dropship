@@ -31,6 +31,7 @@ type fakeCreds struct {
 	gets     map[string]int               // kind → Get 次数
 	puts     []putCall
 	setExps  []setExpiryCall
+	putErr   error // 非 nil = Put 一律失败（模拟写库故障）
 }
 
 type putCall struct {
@@ -79,6 +80,9 @@ func (f *fakeCreds) Get(_ context.Context, storeID, kind string) (map[string]str
 func (f *fakeCreds) Put(_ context.Context, _ string, kind string, payload map[string]string, expiresAt *time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.putErr != nil {
+		return f.putErr
+	}
 	cp := make(map[string]string, len(payload))
 	for k, v := range payload {
 		cp[k] = v
@@ -371,8 +375,8 @@ func TestGetOrder_Success(t *testing.T) {
 	if len(order.ProductItems) != 3 {
 		t.Fatalf("productItems = %d 条", len(order.ProductItems))
 	}
-	if order.ProductItems[0].ProductID != 547486647009 {
-		t.Fatalf("productID = %d", order.ProductItems[0].ProductID)
+	if got := order.ProductItems[0].ProductID.String(); got != "547486647009" {
+		t.Fatalf("productID = %q", got)
 	}
 	if got := order.TradeTerms[0].PhasAmount.String(); got != "6.15" {
 		t.Fatalf("tradeTerms[0].phasAmount = %s", got)

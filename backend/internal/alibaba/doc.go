@@ -37,5 +37,13 @@
 //   - 金额单位口径（预览/下单响应按【分】，订单详情按【元】，以官方文档字段说明为准，
 //     字段注释里逐条标明）。
 //
+// # 限流接线（装配方注意）
+//
+// 本包所有请求走 S1-A 的 ratelimit.Registry（ScopeAlibaba、主体固定串 app），
+// endpoint 键 = 接口全名（如 "alibaba.trade.fastCreateOrder"、"system.oauth2.getToken"）。
+// 配置 ratelimit.alibaba.endpoints 时键名要逐字一致，写错只是「单接口桶静默不生效」；
+// 另外 DefaultRPS 不配（=0）时连总闸都不会建（默认配置见 config.example.yaml 的
+// ratelimit.alibaba），生产环境务必配。
+//
 // 冒烟（真实账号、会花真钱）见 smoke_test.go，带构建标签 smoke，默认不跑。
 package alibaba
