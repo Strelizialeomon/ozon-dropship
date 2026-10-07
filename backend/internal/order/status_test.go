@@ -76,9 +76,9 @@ func TestTrackingActionForFiveTplValues(t *testing.T) {
 		{TplAggregator, TrackingNone, ""},
 		{Tpl3PLTracking, TrackingSet, ""},
 		{TplNonIntegrated, TrackingSet, ""},
-		{TplHybrid, TrackingBlock, CodeHybridTpl},
-		// 官方原文拼写是 hybryd（S1-B 实测）：拼写两版都要认，不许漏判成 unknown_tpl。
+		// posting 体系官方原文是 hybryd（总纲 §7.4 v1.4）；delivery-method 体系写作 hybrid。
 		{TplHybryd, TrackingBlock, CodeHybridTpl},
+		{TplHybrid, TrackingBlock, CodeHybridTpl},
 		{"something_else", TrackingBlock, CodeUnknownTpl},
 	}
 	for _, tc := range cases {
