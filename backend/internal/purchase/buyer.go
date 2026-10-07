@@ -79,22 +79,26 @@ type CreateOrderRequest struct {
 	Qty       int             `json:"qty"`
 	UnitPrice decimal.Decimal `json:"unit_price"`
 	Address   Address         `json:"address"`
-	// Remark 买家留言：必须含 posting_number（中转点认包的凭据，总纲 §5.7）——
-	// 下单防重核对也靠它把买家订单认回来。
+	// Remark 买家留言：必须含 posting_number（中转点认包的凭据，总纲 §5.7）。
 	Remark string `json:"remark"`
+	// OutOrderID 外部订单号（1688 幂等字段，官方建议恒定传入）：下单防重核对
+	// 以它为准——比在留言里做字符串匹配可靠得多（S1-B/C 已合并后补，见适配器 PR）。
+	OutOrderID string `json:"out_order_id"`
 }
 
 // BuyerOrder 买家订单（1688 侧）。
 type BuyerOrder struct {
-	PlatformOrderID string          `json:"platform_order_id"`
-	Amount          decimal.Decimal `json:"amount"`
-	Currency        string          `json:"currency"`
-	Status          string          `json:"status"`
-	PaidAt          *time.Time      `json:"paid_at,omitempty"`
-	Carrier         string          `json:"carrier,omitempty"`
-	TrackingNo      string          `json:"tracking_no,omitempty"`
-	Remark          string          `json:"remark,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
+	PlatformOrderID string `json:"platform_order_id"`
+	// OutOrderID 下单时带的外部订单号（核对「这单是不是本任务下的」的权威凭据）。
+	OutOrderID string          `json:"out_order_id"`
+	Amount     decimal.Decimal `json:"amount"`
+	Currency   string          `json:"currency"`
+	Status     string          `json:"status"`
+	PaidAt     *time.Time      `json:"paid_at,omitempty"`
+	Carrier    string          `json:"carrier,omitempty"`
+	TrackingNo string          `json:"tracking_no,omitempty"`
+	Remark     string          `json:"remark,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 // ListBuyerOrdersRequest 买家订单查询（时间窗）。

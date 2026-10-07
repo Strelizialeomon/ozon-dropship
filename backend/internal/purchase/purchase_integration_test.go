@@ -53,6 +53,7 @@ func (f *fakeBuyer) CreateOrder(_ context.Context, req CreateOrderRequest) (*Buy
 		Amount:          decimal.RequireFromString("12.34"),
 		Currency:        "CNY",
 		Remark:          req.Remark,
+		OutOrderID:      req.OutOrderID,
 		CreatedAt:       time.Now().UTC(),
 	}
 	if !strings.Contains(req.Remark, "-") && req.Remark == "" {
@@ -385,7 +386,8 @@ func TestExecuteAutoAndCrashRecovery(t *testing.T) {
 	// 1688 那边已经有单了（备注里带 posting_number）。
 	env.buyer.placed = append(env.buyer.placed, BuyerOrder{
 		PlatformOrderID: "PO-CRASH", Amount: decimal.RequireFromString("12.34"),
-		Currency: "CNY", Remark: TradeRemark("exec-crash-1", task2.ID), CreatedAt: time.Now().UTC(),
+		Currency: "CNY", Remark: TradeRemark("exec-crash-1", task2.ID),
+		OutOrderID: TradeRemark("exec-crash-1", task2.ID), CreatedAt: time.Now().UTC(),
 	})
 	callsBefore := env.buyer.createCalls
 

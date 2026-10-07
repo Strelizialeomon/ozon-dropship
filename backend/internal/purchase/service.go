@@ -358,14 +358,16 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 		}
 	}
 
-	// 4) 下单。买家留言带 posting_number + 任务标记（中转点认包用前者、防重核对靠后者）。
+	// 4) 下单。买家留言带 posting_number + 任务标记（中转点认包用前者）；
+	//    OutOrderID 是防重核对的权威凭据（1688 幂等字段）。
 	bo, err := buyer.CreateOrder(ctx, CreateOrderRequest{
-		ItemID:    req.ItemID,
-		SkuID:     req.SkuID,
-		Qty:       req.Qty,
-		UnitPrice: req.UnitPrice,
-		Address:   addr,
-		Remark:    TradeRemark(o.PostingNumber, task.ID),
+		ItemID:     req.ItemID,
+		SkuID:      req.SkuID,
+		Qty:        req.Qty,
+		UnitPrice:  req.UnitPrice,
+		Address:    addr,
+		Remark:     TradeRemark(o.PostingNumber, task.ID),
+		OutOrderID: TradeRemark(o.PostingNumber, task.ID),
 	})
 	if err != nil {
 		return s.retryOrFail(ctx, task, fmt.Errorf("1688 下单失败: %w", err))
@@ -419,15 +421,26 @@ func (s *Service) closeForTerminalOrder(ctx context.Context, task *PurchaseTask,
 	return nil
 }
 
-// findPlacedOrder 查买家订单里是否已有**本任务**的单：
-// 买家留言必须同时含 posting_number 与任务标记——只认 posting 会把兄弟任务的单认领走（重审 #1）。
+// findPlacedOrder 查买家订单里是否已有**本任务**的单。
+//
+// 两级匹配：
+//  1. OutOrderID 精确相等（权威：下单时就带上了本任务的标记）；
+//  2. 回退到买家留言同时含 posting_number 与任务标记（老数据 / 平台没回传 OutOrderID 时）。
+//
+// 只认 posting 会把兄弟任务的单认领走（重审 #1），两级都要求「任务」这一维。
 func (s *Service) findPlacedOrder(ctx context.Context, buyer BuyerClient, task *PurchaseTask, o *order.Order) (*BuyerOrder, error) {
 	since := task.CreatedAt.Add(-time.Hour) // 往前留一小时余量（时钟与入库延迟）
 	list, err := buyer.ListBuyerOrders(ctx, ListBuyerOrdersRequest{Since: since, To: s.now()})
 	if err != nil {
 		return nil, err
 	}
+	want := TradeRemark(o.PostingNumber, task.ID)
 	tag := tradeTag(task.ID)
+	for i := range list {
+		if list[i].OutOrderID != "" && list[i].OutOrderID == want {
+			return &list[i], nil
+		}
+	}
 	for i := range list {
 		if o.PostingNumber == "" {
 			continue
