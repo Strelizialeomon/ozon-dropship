@@ -15,7 +15,7 @@
 
 - **独占**：`backend/internal/alibaba/**`。
 - **不碰**：其余全部。
-- **依赖方向**：只依赖 `internal/infra`，不 import 业务包。token 要存进 `credentials` 表：本包定义一个小的「token 存取」接口，方法签名与 S1-A `store` 包对外的凭据读写方法对齐（见 S1-A §3 第 5 条），装配层把 `store` 接进来——**不改 `store` 的代码**（[ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）。
+- **依赖方向**：只依赖 `internal/infra`，不 import 业务包。token 要存进 `credentials` 表：本包定义一个小的「token 存取」接口，方法签名与 S1-A `store` 包对外的凭据读写方法对齐（见 S1-A §3 第 5 条），装配层把 `store` 接进来——**不改 `store` 的代码**（[ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md)）。
 - **共享件**：装配接线要动 `cmd/api` 一行——先在 S1 父 issue 声明（总纲 §12.3 共享件规则）。
 
 ## 3. 对外方法清单（S1-D 据此在使用方定义小接口）

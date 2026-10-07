@@ -17,7 +17,7 @@
 - **独占**：`backend/internal/ozon/**`。
 - **不碰**：其余全部。
 - **共享件**：把 `GetRoles` 接到 S1-A 的到期检查，需在 `cmd/api` 加一行装配——先在 S1 父 issue 声明。
-- **依赖方向**：本包只依赖 `internal/infra`，不 import 任何业务包（[ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）。
+- **依赖方向**：本包只依赖 `internal/infra`，不 import 任何业务包（[ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md)）。
 
 ## 3. 对外方法清单（S1-D 据此在使用方定义小接口）
 
