@@ -1,0 +1,15 @@
+{
+  "file_url": "https://api-seller.ozon.ru/files/package-labels/123456789.pdf",
+  "status": {
+    "code": "completed",
+    "postings_count": 2,
+    "printed_postings_count": 1,
+    "unprinted_postings": [
+      {
+        "message": "Отправление не готово к отгрузке",
+        "posting_number": "48173252-0033-2"
+      }
+    ]
+  },
+  "error": null
+}

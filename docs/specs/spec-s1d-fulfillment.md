@@ -1,7 +1,7 @@
 # spec-s1d-fulfillment —— S1-D 履约编排（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-D**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.1（2026-10-07：PR #16 重审处置——实现修订 13 项、明确不改 1 项，见 §7 第 2 次）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
+> Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.1（2026-10-07：PR #16 重审处置——实现修订 13 项、明确不改 1 项，见 §7 第 2 次；同日拼写同步 `hybrid` → `hybryd`，随 S1-B 实施修正，见总纲 §14 第 3 次）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
 > 跨份验收与协作声明：S1 父 issue（待开）
 
 ## 1. 管什么 / 不管什么
@@ -18,7 +18,7 @@
 - **独占**：`backend/internal/{order,purchase,shipment,catalog}/**`。
 - **不碰**：`internal/{ozon,alibaba}`（B、C）、S1-A 的独占目录、`frontend/**`、`deploy/**`。
 - **共享件**（先在 S1 父 issue 声明再改）：`internal/router` 的注册行、`cmd/api` 的装配行、如需新增迁移文件。
-- **依赖方向**（[ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）：`catalog` 在下；`order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`；`shipment` 依赖 `order`。新订单要生成采购任务：`order` 入库后投 asynq 任务，由 `purchase` 处理，不反向 import。
+- **依赖方向**（[ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md)）：`store`、`catalog` 在下（上方各包都可用）；`order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`、`store`；`shipment` 依赖 `order`、`purchase`、`store`（`purchase` 这条 2026-10-07 新增：交接对照表要国内快递号，只读不写）。新订单要生成采购任务：`order` 入库后投 asynq 任务，由 `purchase` 处理，不反向 import。
 - **对 B、C 的调用**：按它们子 spec 的「对外方法清单」，在本份各包里定义所需的小接口；测试用假实现，装配层接真实客户端——所以开发不用等 B、C 合并。
 
 ## 3. 要做的事
@@ -51,7 +51,7 @@
 - [ ] 采购：自动 / 人工两种执行器；新商家首单自动转人工；模拟「下单成功后崩溃」，重启后不重复下单；自动任务下单成功停在 `ordered`、「记已付款」后推进并回填
 - [ ] 备料单：收货地址 = 中转点、备注含 `posting_number`、无买家个人信息；回填格式校验生效
 - [ ] 中转：两类中转点的状态推进；备货返回成功但 `substatus = ship_failed` 时进异常池
-- [ ] 传单号：`tpl_integration_type` 五个取值各有单测（`ozon` / `aggregator` 不传；`3pl_tracking` / `non_integrated` 传；`hybrid` 进异常池）
+- [ ] 传单号：`tpl_integration_type` 五个取值各有单测（`ozon` / `aggregator` 不传；`3pl_tracking` / `non_integrated` 传；`hybryd` 进异常池）
 - [ ] 异常池：S1 各类异常能写入 `exceptions`、能手动处理、留审计
 - [ ] 接口清单里每个接口都有 handler 测试
 
