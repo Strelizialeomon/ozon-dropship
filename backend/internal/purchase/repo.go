@@ -149,6 +149,11 @@ func (r *Repo) ListTasks(ctx context.Context, f TaskFilter) ([]TaskListItem, int
 	var rows []TaskListItem
 	err := q.Select("t.*, o.posting_number AS posting_number, o.store_id AS store_id, o.status AS order_status").
 		Order("t.created_at DESC").Offset((page - 1) * size).Limit(size).Scan(&rows).Error
+	if rows == nil {
+		// Scan 空结果会留 nil 切片，JSON 序列化成 "items":null；
+		// 前端 DataTable 对 null 读 .length 会抛错整树卸载（白屏，2026-10-07 实报）。
+		rows = []TaskListItem{}
+	}
 	return rows, total, err
 }
 
