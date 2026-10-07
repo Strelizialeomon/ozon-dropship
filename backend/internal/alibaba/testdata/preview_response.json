@@ -1,0 +1,39 @@
+{
+    "orderPreviewResuslt":[
+        {
+            "tradeModeNameList":[
+                "nzassure"
+            ],
+            "status":true,
+            "taoSampleSinglePromotion":false,
+            "sumPayment":4400,
+            "sumCarriage":800,
+            "sumPaymentNoCarriage":3600,
+            "flowFlag":"general",
+            "cargoList":[
+                {
+                    "amount":36,
+                    "finalUnitPrice":18,
+                    "specId":"eb81c61de14f4adb405ffcc2c8a4a3fb",
+                    "skuId":3332085412530,
+                    "offerId":548818919805,
+                    "cargoPromotionList":[
+
+                    ]
+                }
+            ],
+            "shopPromotionList":[
+
+            ],
+            "tradeModelList":[
+                {
+                    "tradeType":"nzassure",
+                    "name":"担保交易",
+                    "description":"买家下单5天内全款支付。自卖家发货起，买家需在10天内确认收货，确认收货后打款给卖家。特别提醒：如卖家已开通极速到账服务，将优先适用极速到账交易，买家支付款项将直接打入卖家账户，详见《极速到账交易及争议处理规则》。",
+                    "opSupport":true
+                }
+            ]
+        }
+    ],
+    "success":true
+}

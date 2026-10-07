@@ -1,0 +1,44 @@
+{
+  "result": [
+    {
+      "logisticsId": "BX111841674232006",
+      "orderEntryIds": "149989279191615400",
+      "status": "SIGN",
+      "logisticsCompanyId": "8",
+      "remarks": "asdasdasdasdsad啊啊啊",
+      "sendGoods": [
+        {
+          "unit": "个",
+          "quantity": 2,
+          "goodName": "【茂茂回归】12.9公开-sku区间价-淘货源"
+        }
+      ],
+      "receiver": {
+        "receiverCountyCode": "310105",
+        "receiverCity": "上海市",
+        "receiverProvinceCode": "310000",
+        "receiverCityCode": "310100",
+        "encrypt": "CN",
+        "receiverCounty": "长宁区",
+        "receiverMobile": "13800138000",
+        "receiverProvince": "上海",
+        "receiverName": "XXX",
+        "receiverAddress": "XXX街道 XX路999",
+        "receiverPhone": ""
+      },
+      "sender": {
+        "senderCityCode": "330100",
+        "senderAddress": "网商路699号",
+        "senderName": "张三",
+        "senderProvince": "浙江省",
+        "encrypt": "CN",
+        "senderCity": "杭州市",
+        "senderCountyCode": "330108",
+        "senderProvinceCode": "330000",
+        "senderMobile": "12345678900",
+        "senderPhone": "",
+        "senderCounty": "滨江区"
+      }
+    }
+  ]
+}
