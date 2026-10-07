@@ -2,7 +2,8 @@
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-D**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
 > Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.1（2026-10-07：PR #16 重审处置——实现修订 13 项、明确不改 1 项，见 §7 第 2 次；同日拼写同步 `hybrid` → `hybryd`，随 S1-B 实施修正，见总纲 §14 第 3 次）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
-> 跨份验收与协作声明：S1 父 issue（待开）
+> 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
+> 实施状态：已合并（PR #16），待上线
 
 ## 1. 管什么 / 不管什么
 

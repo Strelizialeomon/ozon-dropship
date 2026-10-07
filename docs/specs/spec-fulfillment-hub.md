@@ -1,6 +1,6 @@
 # spec-fulfillment-hub —— Ozon × 中国货源 · 履约中台（总 spec / 总纲）
 
-> Issue: 待开（本 spec 合并后按波次开实施 issue，届时回填号）
+> Issue: S1 已实施——实施单 [#6](https://github.com/Strelizialeomon/ozon-dropship/issues/6) ～ [#11](https://github.com/Strelizialeomon/ozon-dropship/issues/11)（各子项目一张，见各子 spec）；S2–S4 轮到时另开
 > 状态：**v1.4**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR；PR #4 重审发现已处置，见 §14 第 2 次；v1.4 实施期修正与 PR #14 重审处置——拼写改 `hybryd`、`/ship/package` 语义注、面单接口注两步流程（§7.1 / §7.4），见 §14 第 3 次）
 > **设计权威 = 本文（总纲）**。S1 拆成 6 份子 spec（拆分地图见 §12.3；2026-10-07 owner 拍板，取代同日较早的「不拆子 spec」）；子 spec 只写落地、指向本文，与本文冲突时以本文为准。S2–S4 轮到时再定拆法。
 > 立项日期：2026-10-07 ｜ 需求方：owner
