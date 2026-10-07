@@ -44,7 +44,7 @@ func ozonRolesFetcherFactory(limiter *ratelimit.Registry) store.OzonFetcherFacto
 		return &ozonRolesFetcher{client: ozon.New(limiter, ozon.Options{
 			ClientID: shop.ClientID,
 			APIKey:   apiKey,
-			Subject:  shop.ID, // 限流桶按店铺（每店一个 Client-Id）
+			Subject:  shop.ClientID, // 限流桶按 Client-Id（官方口径：每 Client-Id 50 次/秒）
 		})}, nil
 	}
 }

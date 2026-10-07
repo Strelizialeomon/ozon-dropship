@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -256,6 +258,115 @@ func TestShipPosting(t *testing.T) {
 	}
 }
 
+// TestListPostings_DefaultLimit 不传 Limit 时默认 100（官方上限），不是旧文档的 1000。
+func TestListPostings_DefaultLimit(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		body := decodeBody(t, w, r)
+		if body == nil {
+			return
+		}
+		if body["limit"] != float64(DefaultListLimit) {
+			t.Errorf("默认 limit 应为 %d，实际 %v", DefaultListLimit, body["limit"])
+		}
+		if DefaultListLimit > 100 {
+			t.Errorf("官方 schema 上限为 100，DefaultListLimit=%d 会触发 400", DefaultListLimit)
+		}
+		writeJSON(t, w, readTestdata(t, "listpostings_response.json"))
+	}
+	c := newTestClient(t, 0, h)
+
+	now := time.Now()
+	if _, err := c.ListPostings(context.Background(), ListPostingsParams{
+		Since: Time{now.Add(-time.Hour)},
+		To:    Time{now},
+	}); err != nil {
+		t.Fatalf("ListPostings 失败: %v", err)
+	}
+}
+
+// TestListPostings_WindowValidation 时间窗校验：To 必须晚于 Since、跨度 ≤ 1 年（官方限制）。
+func TestListPostings_WindowValidation(t *testing.T) {
+	var calls int32
+	h := func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&calls, 1) }
+	c := newTestClient(t, 0, h)
+	ctx := context.Background()
+	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name     string
+		since    time.Time
+		to       time.Time
+	}{
+		{"To 早于 Since", t0, t0.Add(-time.Minute)},
+		{"To 等于 Since", t0, t0},
+		{"跨度超过 1 年", t0, t0.Add(366 * 24 * time.Hour)},
+	}
+	for _, tc := range cases {
+		if _, err := c.ListPostings(ctx, ListPostingsParams{Since: Time{tc.since}, To: Time{tc.to}}); !errors.Is(err, ErrInvalidParams) {
+			t.Errorf("%s: 应返回 ErrInvalidParams，实际: %v", tc.name, err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("本地校验失败不应发请求，实际 %d 次", got)
+	}
+}
+
+// TestPostingFieldParsing S1-D 要用的字段在非空值下逐一验证：
+// parent_posting_number、tpl_integration_type 全部五个取值。
+func TestPostingFieldParsing(t *testing.T) {
+	tpls := []string{
+		TplIntegrationOzon, TplIntegrationAggregator, TplIntegration3PLTracking,
+		TplIntegrationNonIntegrated, TplIntegrationHybryd,
+	}
+	var items []string
+	for i, tpl := range tpls {
+		items = append(items, fmt.Sprintf(
+			`{"posting_number": "P-%d", "parent_posting_number": "PARENT-9",
+			  "tpl_integration_type": %q, "status": "delivering", "substatus": "posting_created",
+			  "shipment_date": "2026-05-18T12:00:00.000Z"}`, i, tpl))
+	}
+	body := `{"has_next": false, "postings": [` + strings.Join(items, ",") + `]}`
+	h := func(w http.ResponseWriter, r *http.Request) { writeJSON(t, w, []byte(body)) }
+	c := newTestClient(t, 0, h)
+
+	now := time.Now()
+	page, err := c.ListPostings(context.Background(), ListPostingsParams{
+		Since: Time{now.Add(-time.Hour)},
+		To:    Time{now},
+	})
+	if err != nil {
+		t.Fatalf("ListPostings 失败: %v", err)
+	}
+	if len(page.Postings) != len(tpls) {
+		t.Fatalf("应有 %d 条，实际 %d", len(tpls), len(page.Postings))
+	}
+	for i, p := range page.Postings {
+		if p.TplIntegrationType != tpls[i] {
+			t.Errorf("第 %d 条 tpl_integration_type 应解析为 %q，实际 %q", i, tpls[i], p.TplIntegrationType)
+		}
+		if p.ParentPostingNumber != "PARENT-9" {
+			t.Errorf("第 %d 条 parent_posting_number 应解析为 PARENT-9（非空值），实际 %q", i, p.ParentPostingNumber)
+		}
+	}
+}
+
+// TestGetPosting_RelatedPostings related_postings 是对象口径（{related_posting_numbers: []}），
+// 不是字符串数组——类型写错会让整条响应解析失败。
+func TestGetPosting_RelatedPostings(t *testing.T) {
+	body := `{"result": {"posting_number": "P-1", "status": "delivering",
+		"related_postings": {"related_posting_numbers": ["P-1", "P-2"]}}}`
+	h := func(w http.ResponseWriter, r *http.Request) { writeJSON(t, w, []byte(body)) }
+	c := newTestClient(t, 0, h)
+
+	detail, err := c.GetPosting(context.Background(), "P-1")
+	if err != nil {
+		t.Fatalf("含 related_postings 对象的响应应能解析: %v", err)
+	}
+	if detail.RelatedPostings == nil || len(detail.RelatedPostings.RelatedPostingNumbers) != 2 {
+		t.Fatalf("related_postings 未按对象解析: %+v", detail.RelatedPostings)
+	}
+}
+
 // TestShipPosting_Validation 参数校验：空单号 / 空包裹 / 包裹里没商品。
 func TestShipPosting_Validation(t *testing.T) {
 	var calls int32
@@ -272,6 +383,8 @@ func TestShipPosting_Validation(t *testing.T) {
 		{"空单号", "", []ShipPackage{valid}},
 		{"空包裹列表", "A-1", nil},
 		{"包裹没商品", "A-1", []ShipPackage{{}}},
+		{"商品 ID 非正", "A-1", []ShipPackage{{Products: []ShipProduct{{ProductID: 0, Quantity: 1}}}}},
+		{"数量非正", "A-1", []ShipPackage{{Products: []ShipProduct{{ProductID: 1, Quantity: -1}}}}},
 	}
 	for _, tc := range cases {
 		if _, err := c.ShipPosting(ctx, tc.number, tc.packages); !errors.Is(err, ErrInvalidParams) {

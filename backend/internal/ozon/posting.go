@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
-// DefaultListLimit 拉单默认每页条数（官方未给默认值；社区实践上限 1000）。
-const DefaultListLimit = 1000
+// DefaultListLimit 拉单默认每页条数：官方 v4/v2 schema 的 limit 上限为 100，默认取上限。
+const DefaultListLimit = 100
+
+// maxListWindow 拉单时间窗上限：官方明文要求 ≤ 1 年。
+const maxListWindow = 365 * 24 * time.Hour
 
 // 排序方向（官方 schema 枚举 ASC / DESC）。
 const (
@@ -69,6 +73,12 @@ type listPostingsRequest struct {
 func (c *Client) ListPostings(ctx context.Context, p ListPostingsParams) (*PostingsPage, error) {
 	if p.Since.IsZero() || p.To.IsZero() {
 		return nil, fmt.Errorf("%w: ListPostings 需要时间窗 Since/To", ErrInvalidParams)
+	}
+	if !p.To.After(p.Since.Time) {
+		return nil, fmt.Errorf("%w: ListPostings 的 To 应在 Since 之后", ErrInvalidParams)
+	}
+	if p.To.Sub(p.Since.Time) > maxListWindow {
+		return nil, fmt.Errorf("%w: ListPostings 时间窗不能超过 1 年（官方限制）", ErrInvalidParams)
 	}
 	req := listPostingsRequest{
 		Filter:  listPostingsFilter{Since: p.Since, To: p.To, Statuses: p.Statuses},
@@ -233,6 +243,11 @@ func (c *Client) ShipPosting(ctx context.Context, postingNumber string, packages
 	for i, pkg := range packages {
 		if len(pkg.Products) == 0 {
 			return nil, fmt.Errorf("%w: ShipPosting 第 %d 个包裹没有商品", ErrInvalidParams, i+1)
+		}
+		for j, prod := range pkg.Products {
+			if prod.ProductID <= 0 || prod.Quantity <= 0 {
+				return nil, fmt.Errorf("%w: ShipPosting 第 %d 个包裹第 %d 个商品 product_id/quantity 应为正数", ErrInvalidParams, i+1, j+1)
+			}
 		}
 	}
 	var resp ShipResult

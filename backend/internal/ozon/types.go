@@ -245,7 +245,13 @@ type PostingDetail struct {
 	Products                 []DetailProduct `json:"products"`
 	Barcodes                 *Barcode        `json:"barcodes"`
 	Cancellation             *Cancellation   `json:"cancellation"`
-	RelatedPostings          []string        `json:"related_postings"`
+	RelatedPostings          *RelatedPostings `json:"related_postings"`
+}
+
+// RelatedPostings 关联寄件（官方 v3 单详情是对象口径 {related_posting_numbers: []}，
+// 与列表项无此字段；with.related_postings=true 时返回）。
+type RelatedPostings struct {
+	RelatedPostingNumbers []string `json:"related_posting_numbers"`
 }
 
 // DetailProduct 单详情里的商品（官方 v3PostingProductDetail；price 是字符串、

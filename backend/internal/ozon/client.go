@@ -44,6 +44,8 @@ const (
 	pathPostingGet         = "/v3/posting/fbs/get"
 	pathPostingShip        = "/v4/posting/fbs/ship"
 	pathPostingLabel       = "/v2/posting/fbs/package-label"
+	pathLabelTaskCreate    = "/v3/posting/fbs/package-label/create"
+	pathLabelTaskGet       = "/v2/posting/fbs/package-label/get"
 	pathTrackingNumberSet  = "/v2/fbs/posting/tracking-number/set"
 	pathRoles              = "/v1/roles"
 	pathDeliveryMethodList = "/v2/delivery-method/list"
@@ -56,6 +58,8 @@ const (
 	EndpointPostingGet         = "posting/fbs/get"
 	EndpointPostingShip        = "posting/fbs/ship"
 	EndpointPostingLabel       = "posting/fbs/package-label"
+	EndpointLabelTaskCreate    = "posting/fbs/package-label/create"
+	EndpointLabelTaskGet       = "posting/fbs/package-label/get"
 	EndpointTrackingNumberSet  = "fbs/posting/tracking-number/set"
 	EndpointRoles              = "roles"
 	EndpointDeliveryMethodList = "delivery-method/list"
@@ -67,8 +71,8 @@ type Options struct {
 	ClientID string
 	// APIKey Ozon Api-Key（请求头；由调用方从保险箱解密后传入）。
 	APIKey string
-	// Subject 限流桶主体：传店铺 ID（同店一个桶，与 S1-A 契约一致）；
-	// 留空退化为用 ClientID 作主体。
+	// Subject 限流桶主体：官方限额按 Client-Id 计（每 Client-Id 50 次/秒），
+	// 传 Client-Id；留空同样退化为 ClientID（两店共用同一 Client-Id 时共桶，防绕过总闸）。
 	Subject string
 	// BaseURL 覆盖 API 基址（测试 / 代理用）；空 = DefaultBaseURL。
 	BaseURL string
@@ -102,7 +106,15 @@ func New(limiter *ratelimit.Registry, opts Options) *Client {
 	}
 	hc := opts.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: defaultHTTPTimeout}
+		hc = &http.Client{
+			Timeout: defaultHTTPTimeout,
+			// 拒绝跟随重定向：Go 的跨域重定向会保留自定义认证头（只剥 Authorization /
+			// Cookie），不能让 Client-Id / Api-Key 跟着 3xx 跑到别的域。跟随被拒时
+			// http.Do 返回最后一个响应，3xx 会走下面的非 200 分支。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	return &Client{
 		baseURL:  strings.TrimRight(base, "/"),
@@ -174,9 +186,13 @@ func (c *Client) call(ctx context.Context, path string, req any) ([]byte, error)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("读取 Ozon 响应失败（%s）: %w", path, err)
+	}
+	if len(body) > maxBodyBytes {
+		// 显式报错而不是返回截断后的字节：二进制（面单 PDF）被静默截断会产出坏文件。
+		return nil, ratelimit.Permanent(fmt.Errorf("响应体超过 %d 字节上限（%s）", maxBodyBytes, path))
 	}
 
 	switch {

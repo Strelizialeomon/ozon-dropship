@@ -1,6 +1,7 @@
 package ozon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -248,7 +249,53 @@ func TestNew_PanicsOnNilLimiter(t *testing.T) {
 	New(nil, Options{ClientID: "x"})
 }
 
-// TestParseRetryAfter 三种形态：秒数、HTTP-date、解析不出。
+// TestClient_RejectsRedirect 3xx 不跟随：防止认证头被转发到别的域。
+func TestClient_RejectsRedirect(t *testing.T) {
+	var targetCalls int32
+	var leakedAuth, leakedKey string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetCalls, 1)
+		leakedAuth = r.Header.Get("Client-Id")
+		leakedKey = r.Header.Get("Api-Key")
+	}))
+	t.Cleanup(target.Close)
+
+	h := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/evil", http.StatusFound)
+	}
+	c := newTestClient(t, 0, h)
+
+	_, err := c.GetRoles(context.Background())
+	if err == nil {
+		t.Fatal("3xx 不应被当成功")
+	}
+	if got := atomic.LoadInt32(&targetCalls); got != 0 {
+		t.Fatalf("不应跟随重定向，目标站收到 %d 次请求（泄漏 Client-Id=%q Api-Key=%q）",
+			got, leakedAuth, leakedKey)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusFound {
+		t.Fatalf("应返回 *APIError 302（Permanent），实际 %T: %v", err, err)
+	}
+}
+
+// TestClient_BodyTooLarge 响应超上限显式报错（不静默截断）。
+func TestClient_BodyTooLarge(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		big := bytes.Repeat([]byte("a"), maxBodyBytes+1024)
+		if _, err := w.Write(big); err != nil {
+			t.Errorf("写大响应失败: %v", err)
+		}
+	}
+	c := newTestClient(t, 0, h)
+
+	_, err := c.GetRoles(context.Background())
+	var perm *ratelimit.PermanentError
+	if !errors.As(err, &perm) {
+		t.Fatalf("超限应返回 *ratelimit.PermanentError（含明确报错），实际 %T: %v", err, err)
+	}
+}
 func TestParseRetryAfter(t *testing.T) {
 	if got := parseRetryAfter("7"); got != 7*time.Second {
 		t.Errorf("秒数解析错误: %v", got)

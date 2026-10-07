@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"testing"
 )
@@ -40,14 +41,109 @@ func TestGetPackageLabel(t *testing.T) {
 	}
 }
 
-// TestGetPackageLabel_Validation 空列表本地拒绝。
+// TestGetPackageLabel_Validation 空列表 / 超 20 个本地拒绝。
 func TestGetPackageLabel_Validation(t *testing.T) {
 	var calls int32
 	h := func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&calls, 1) }
 	c := newTestClient(t, 0, h)
+	ctx := context.Background()
 
-	if _, err := c.GetPackageLabel(context.Background(), nil); !errors.Is(err, ErrInvalidParams) {
+	if _, err := c.GetPackageLabel(ctx, nil); !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("空列表应返回 ErrInvalidParams，实际: %v", err)
+	}
+	tooMany := make([]string, maxLabelPostings+1)
+	for i := range tooMany {
+		tooMany[i] = "P-" + strconv.Itoa(i)
+	}
+	if _, err := c.GetPackageLabel(ctx, tooMany); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("超过 %d 个应返回 ErrInvalidParams，实际: %v", maxLabelPostings, err)
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Fatal("不应发请求")
+	}
+}
+
+// TestCreatePackageLabel 面单两步流程·创建任务：请求编码与任务解析。
+func TestCreatePackageLabel(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pathLabelTaskCreate {
+			t.Errorf("路径应为 %s，实际 %s", pathLabelTaskCreate, r.URL.Path)
+		}
+		body := decodeBody(t, w, r)
+		if body == nil {
+			return
+		}
+		nums, _ := body["posting_numbers"].([]any)
+		if len(nums) != 1 || nums[0] != "48173252-0033-2" {
+			t.Errorf("posting_numbers 不符: %v", body["posting_numbers"])
+		}
+		writeJSON(t, w, readTestdata(t, "labeltaskcreate_response.json"))
+	}
+	c := newTestClient(t, 0, h)
+
+	tasks, err := c.CreatePackageLabel(context.Background(), []string{"48173252-0033-2"})
+	if err != nil {
+		t.Fatalf("CreatePackageLabel 失败: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].TaskID == 0 || tasks[0].TaskType == "" {
+		t.Fatalf("任务解析不符: %+v", tasks)
+	}
+}
+
+// TestCreatePackageLabel_Validation 空列表本地拒绝。
+func TestCreatePackageLabel_Validation(t *testing.T) {
+	var calls int32
+	h := func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&calls, 1) }
+	c := newTestClient(t, 0, h)
+
+	if _, err := c.CreatePackageLabel(context.Background(), nil); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("空列表应返回 ErrInvalidParams，实际: %v", err)
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Fatal("不应发请求")
+	}
+}
+
+// TestGetPackageLabelTask 面单两步流程·查任务：请求编码与结果解析。
+func TestGetPackageLabelTask(t *testing.T) {
+	h := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pathLabelTaskGet {
+			t.Errorf("路径应为 %s，实际 %s", pathLabelTaskGet, r.URL.Path)
+		}
+		body := decodeBody(t, w, r)
+		if body == nil {
+			return
+		}
+		if body["task_id"] != float64(123456789) {
+			t.Errorf("task_id 不符: %v", body["task_id"])
+		}
+		writeJSON(t, w, readTestdata(t, "labeltaskget_response.json"))
+	}
+	c := newTestClient(t, 0, h)
+
+	res, err := c.GetPackageLabelTask(context.Background(), 123456789)
+	if err != nil {
+		t.Fatalf("GetPackageLabelTask 失败: %v", err)
+	}
+	if res.FileURL == "" {
+		t.Error("file_url 未解析")
+	}
+	if res.Status == nil || res.Status.Code != LabelTaskCompleted {
+		t.Errorf("status 未解析: %+v", res.Status)
+	}
+	if len(res.Status.UnprintedPostings) != 1 || res.Status.UnprintedPostings[0].PostingNumber == "" {
+		t.Errorf("unprinted_postings 未解析: %+v", res.Status)
+	}
+}
+
+// TestGetPackageLabelTask_Validation 非法 taskID 本地拒绝。
+func TestGetPackageLabelTask_Validation(t *testing.T) {
+	var calls int32
+	h := func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&calls, 1) }
+	c := newTestClient(t, 0, h)
+
+	if _, err := c.GetPackageLabelTask(context.Background(), 0); !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("taskID=0 应返回 ErrInvalidParams，实际: %v", err)
 	}
 	if atomic.LoadInt32(&calls) != 0 {
 		t.Fatal("不应发请求")
