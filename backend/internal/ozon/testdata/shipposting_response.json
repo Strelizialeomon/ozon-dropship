@@ -1,0 +1,23 @@
+{
+  "additional_data": [
+    {
+      "posting_number": "89491381-0072-1",
+      "products": [
+        {
+          "currency_code": "RUB",
+          "mandatory_mark": [
+            "123"
+          ],
+          "name": "string",
+          "offer_id": "17125",
+          "price": "2000",
+          "quantity": 1,
+          "sku": 149618972
+        }
+      ]
+    }
+  ],
+  "result": [
+    "89491381-0072-1"
+  ]
+}

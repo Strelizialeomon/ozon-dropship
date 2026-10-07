@@ -1,0 +1,66 @@
+# 复制为 config/config.yaml 后按机器改；真配置不进 git（.gitignore 已挡）。
+# server 节全局共享；mode 决定加载下面哪个分节（release / debug）。
+
+server:
+  port: 8080
+  mode: debug # debug | release
+  # 信任的反代 IP（同机 Caddy 填 127.0.0.1）；留空 = 不信任任何代理头
+  trusted_proxies: ["127.0.0.1"]
+
+debug:
+  database:
+    host: 127.0.0.1
+    port: 3306
+    username: root
+    password: ""
+    database: ozon_dropship
+
+release:
+  database:
+    host: 127.0.0.1
+    port: 3306
+    username: ozon
+    password: ""
+    database: ozon_dropship
+
+# 任务队列 + 登录会话共用
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+
+# 凭据保险箱（总纲 §5.4）：主密钥由 systemd LoadCredentialEncrypted 注入到该目录，
+# 文件内容是一份 Tink keyset JSON。不配 = 保险箱不启用，凭据接口拒绝写入（绝不落明文）。
+vault:
+  credentials_dir: /run/credentials/ozon-dropship.service
+  master_key_file: vault_keyset.json
+
+# 登录会话（scs + Redis）。release 模式的 Cookie 自动带 Secure。
+session:
+  cookie_name: ozon_session
+  lifetime_hours: 168 # 7 天
+
+# 飞书机器人（凭据到期告警等）。webhook_url 留空 = 不启用。
+notify:
+  feishu:
+    webhook_url: ""
+    secret: ""
+    dedupe_window_minutes: 60 # 同一错误去重窗口
+    flush_seconds: 60 # 按分钟合并发送
+
+# 渠道限流（总纲 §5.5）
+ratelimit:
+  ozon:
+    default_rps: 50 # 每 Client-Id 总闸（总纲 §3.1）
+    endpoints: # 单接口限额（接口名 → 每秒次数）
+      stocks: 0.0333 # 同一商品库存 30 秒 1 次（总纲 §3.1）【第三方口径，未逐字核】
+  alibaba:
+    default_rps: 5 # 官方未公开【未验】，实施期实测（总纲 §3.2 / §13.2）
+    endpoints: {}
+
+# asynq 与补投扫描（总纲 §5.5）
+queue:
+  concurrency: 10
+  rescan_seconds: 300 # 补投扫描周期：5 分钟（总纲 §13.1）
+  retry_max_retries: 3 # 失败重试上限（总纲 §5.5）
+  retry_backoff_seconds: 1 # 指数退避基数
