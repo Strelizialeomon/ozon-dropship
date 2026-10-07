@@ -109,6 +109,9 @@ func main() {
 		},
 	})
 
+	// 渠道限流器：S1-B 起用，Ozon 客户端所有请求经它（S1-C 共用同一实例）。
+	limiter := newRateLimiter(cfg)
+
 	// 9. 各域装配
 	shopRepo := store.NewRepo(db.DB)
 	credSvc := store.NewCredentialService(db.DB, v, auditRec)
@@ -116,10 +119,9 @@ func main() {
 	credHandler := store.NewCredentialHandler(credSvc, auditRec)
 	systemHandler := store.NewSystemHandler(shopRepo, q.Inspector())
 
-	// 凭据到期检查：每天北京时间 09:00（总纲 §13.1）。
-	// TODO(S1-B 合并后)：把 ozon 客户端适配成 store.OzonRolesFetcher 工厂传进来，
-	// 届时每天还会自动读 /v1/roles 刷新 expires_at。
-	expiryChecker := store.NewExpiryChecker(credSvc, shopRepo, notifier, nil)
+	// 凭据到期检查：每天北京时间 09:00（总纲 §13.1）；Ozon 侧顺带读 /v1/roles
+	// 刷新到期时间（总纲 §5.8，适配见 cmd/api/ozon.go）。
+	expiryChecker := store.NewExpiryChecker(credSvc, shopRepo, notifier, ozonRolesFetcherFactory(limiter))
 	q.Handle(store.TaskTypeExpiryCheck, expiryChecker.Handle)
 	if err := q.RegisterCron("0 9 * * *", queue.Task{Type: store.TaskTypeExpiryCheck}); err != nil {
 		logger.Fatalf("[main] %v", err)
