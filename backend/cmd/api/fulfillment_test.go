@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -221,7 +223,7 @@ func TestOzonFulfillerShipPostingBuildsPackage(t *testing.T) {
 func TestOzonFulfillerLabelTwoStep(t *testing.T) {
 	var got int
 	file := []byte("%PDF-1.4 fake-label")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v3/posting/fbs/package-label/create":
 			var body struct {
@@ -241,7 +243,7 @@ func TestOzonFulfillerLabelTwoStep(t *testing.T) {
 				_, _ = w.Write([]byte(`{"status":{"code":"in_progress","postings_count":1}}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"file_url":"` + "http://" + r.Host + `/label-file.pdf","status":{"code":"completed","postings_count":1,"printed_postings_count":1}}`))
+			_, _ = w.Write([]byte(`{"file_url":"` + "https://" + r.Host + `/label-file.pdf","status":{"code":"completed","postings_count":1,"printed_postings_count":1}}`))
 		case "/label-file.pdf":
 			_, _ = w.Write(file)
 		default:
@@ -249,6 +251,11 @@ func TestOzonFulfillerLabelTwoStep(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+
+	// TLS 测试服是自签证书：换默认 Transport 才连得上（生产用默认 Transport）。
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = oldTransport }()
 
 	f := &ozonFulfiller{
 		c:             ozon.New(newTestLimiter(), ozon.Options{ClientID: "c1", APIKey: "k1", BaseURL: srv.URL}),
@@ -401,10 +408,15 @@ func TestAlibabaBuyerCreateOrderPartialFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &alibabaBuyer{c: client}
-	if _, err := b.CreateOrder(context.Background(), purchase.CreateOrderRequest{
+	_, err = b.CreateOrder(context.Background(), purchase.CreateOrderRequest{
 		ItemID: "6688990011", SkuID: "s", Qty: 1, Remark: "x", OutOrderID: "x",
-	}); err == nil {
+	})
+	if err == nil {
 		t.Fatal("部分商品失败必须报错，不能假装下单成功")
+	}
+	// 而且要标成「不可重试」：重试会被核对路径洗成已下单（轻审 #6）。
+	if !errors.Is(err, purchase.ErrOrderIncomplete) {
+		t.Fatalf("应包成 ErrOrderIncomplete，实际: %v", err)
 	}
 }
 
@@ -453,3 +465,165 @@ var (
 	_ purchase.BuyerClient      = (*alibabaBuyer)(nil)
 	_ alibaba.CredentialStore   = credentialStoreAdapter{}
 )
+
+// ---- PR #19 轻审的回归用例 ----
+
+// #3：面单任务 completed 但本单没印出来（unprinted_postings 非空）→ 报错，不许当成功。
+func TestOzonFulfillerLabelUnprintedPostingFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v3/posting/fbs/package-label/create":
+			_, _ = w.Write([]byte(`{"tasks":[{"task_id":9}]}`))
+		case "/v2/posting/fbs/package-label/get":
+			_, _ = w.Write([]byte(`{"file_url":"https://example.invalid/x.pdf","status":{"code":"completed","postings_count":2,"printed_postings_count":1,"unprinted_postings":[{"posting_number":"p1","message":"Отправление не готово к отгрузке"}]}}`))
+		default:
+			t.Error("不该下载：本单没印出来时不能当成功", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	f := &ozonFulfiller{
+		c:             ozon.New(newTestLimiter(), ozon.Options{ClientID: "c1", APIKey: "k1", BaseURL: srv.URL}),
+		labelTimeout:  time.Second,
+		labelInterval: 5 * time.Millisecond,
+		download:      downloadURL,
+	}
+	if _, err := f.GetPackageLabel(context.Background(), "p1"); err == nil {
+		t.Fatal("completed 但 unprinted 非空必须报错")
+	}
+}
+
+// #4：逐条结果为空 / 不是本寄件号 → 视为没传成功。
+func TestOzonFulfillerSetTrackingNeedsMatchingSuccess(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"空结果数组", `{"result":[]}`},
+		{"返回别的寄件号", `{"result":[{"posting_number":"other","result":true}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			f := &ozonFulfiller{c: ozon.New(newTestLimiter(), ozon.Options{ClientID: "c1", APIKey: "k1", BaseURL: srv.URL})}
+			if err := f.SetTrackingNumber(context.Background(), "p1", "SF123456", "顺丰"); err == nil {
+				t.Fatal("没有明确 success 就该报错")
+			}
+		})
+	}
+}
+
+// #8：面单文件地址只认 https；超限报错不截断。
+func TestDownloadURLGuards(t *testing.T) {
+	if _, err := downloadURL(context.Background(), "http://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Fatal("非 https 地址必须拒绝（SSRF 面）")
+	}
+	if _, err := downloadURL(context.Background(), "not a url"); err == nil {
+		t.Fatal("坏地址应报错")
+	}
+
+	// 超限：返回 maxLabelBytes+1 字节 → 必须报错，不许截断当成功。
+	big := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := make([]byte, 1<<20)
+		for i := 0; i < (maxLabelBytes>>20)+1; i++ {
+			_, _ = w.Write(chunk)
+		}
+	}))
+	defer big.Close()
+	// 测试服务器是自签证书：换掉默认 Transport 才连得上（生产用默认 Transport）。
+	old := http.DefaultTransport
+	http.DefaultTransport = big.Client().Transport
+	defer func() { http.DefaultTransport = old }()
+	if _, err := downloadURL(context.Background(), big.URL+"/big.pdf"); err == nil {
+		t.Fatal("超过上限应报错")
+	}
+}
+
+// #5：买家订单核对要翻页取全（50 一页，第二页的才是本任务的单）。
+func TestAlibabaBuyerListBuyerOrdersPaging(t *testing.T) {
+	var pages []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "getToken") {
+			_, _ = w.Write([]byte(`{"access_token":"tok-new-1234567890","refresh_token":"ref-new-1","expires_in":36000,"refresh_token_timeout":"20270507120000+0800"}`))
+			return
+		}
+		_ = r.ParseForm()
+		page, _ := strconv.Atoi(r.PostForm.Get("page"))
+		pages = append(pages, page)
+		if page == 1 {
+			orders := make([]string, 0, 50)
+			for i := 0; i < 50; i++ {
+				orders = append(orders, `{"baseInfo":{"id":"1`+strconv.Itoa(i)+`","status":"waitbuyerpay"}}`)
+			}
+			_, _ = w.Write([]byte(`{"result":[` + strings.Join(orders, ",") + `],"totalRecord":51}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"result":[{"baseInfo":{"id":"999","status":"waitbuyersend","outOrderId":"0123-1#T99999999"}}],"totalRecord":51}`))
+	}))
+	defer srv.Close()
+
+	client, err := alibaba.NewClient(alibaba.Config{BaseURL: srv.URL, Registry: newTestLimiter(), Credentials: newStubCredStore()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &alibabaBuyer{c: client}
+	got, err := b.ListBuyerOrders(context.Background(), purchase.ListBuyerOrdersRequest{
+		Since: time.Now().Add(-2 * time.Hour), To: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 51 {
+		t.Fatalf("应翻页取全 51 单，实际 %d（页码序列 %v）", len(got), pages)
+	}
+	if got[50].OutOrderID != "0123-1#T99999999" {
+		t.Fatalf("第二页的单没取到: %+v", got[50])
+	}
+}
+
+// #2：核对窗口按北京时间发给网关（不是 UTC 墙钟）。
+func TestAlibabaBuyerListBuyerOrdersSendsBeijingTime(t *testing.T) {
+	var gotStart string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "getToken") {
+			_, _ = w.Write([]byte(`{"access_token":"tok-new-1234567890","refresh_token":"ref-new-1","expires_in":36000,"refresh_token_timeout":"20270507120000+0800"}`))
+			return
+		}
+		_ = r.ParseForm()
+		gotStart = r.PostForm.Get("createStartTime")
+		_, _ = w.Write([]byte(`{"result":[],"totalRecord":0}`))
+	}))
+	defer srv.Close()
+
+	client, err := alibaba.NewClient(alibaba.Config{BaseURL: srv.URL, Registry: newTestLimiter(), Credentials: newStubCredStore()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &alibabaBuyer{c: client}
+	// 2026-10-07 00:30 UTC = 北京时间 08:30 → 网关该收到 08:30 而不是 00:30。
+	utc := time.Date(2026, 10, 7, 0, 30, 0, 0, time.UTC)
+	if _, err := b.ListBuyerOrders(context.Background(), purchase.ListBuyerOrdersRequest{Since: utc, To: utc.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if gotStart != "2026-10-07 08:30:00" {
+		t.Fatalf("应发北京时间，实际 %q", gotStart)
+	}
+}
+
+// #7：记账金额取实付（tradeTerms），没有付款记录时退回应付款。
+func TestBuyerOrderAmountPrefersPaid(t *testing.T) {
+	o := &alibaba.Order{}
+	o.BaseInfo.ID = "123"
+	o.BaseInfo.TotalAmount = decimal.RequireFromString("100.00")
+	if got := orderAmount(o); !got.Equal(decimal.RequireFromString("100.00")) {
+		t.Fatalf("没有 tradeTerms 时应退回应付款，实际 %s", got)
+	}
+	o.TradeTerms = []alibaba.TradeTerm{{PhasAmount: decimal.RequireFromString("88.00")}}
+	if got := orderAmount(o); !got.Equal(decimal.RequireFromString("88.00")) {
+		t.Fatalf("有 tradeTerms 时应取实付，实际 %s", got)
+	}
+}

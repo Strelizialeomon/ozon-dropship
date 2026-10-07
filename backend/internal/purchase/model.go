@@ -85,6 +85,12 @@ type TaskPayload struct {
 	Currency      string            `json:"currency"`
 	Items         []TaskPayloadItem `json:"items"`
 	Note          string            `json:"note,omitempty"` // 流转备注（如自动转人工的原因）
+
+	// OrderAttemptedAt 下单尝试时刻（调 1688 下单接口**之前**落库）。
+	// 用途：重试时若「核对不到那张单」（消息丢了 / 平台没回传 outOrderId），
+	// 说明我们确实下过单——此时不再自动下单，转异常池让人去 1688 后台核。
+	// （重复采购要花钱；停下来只花人的几分钟。PR #19 轻审 #1，owner 拍板。）
+	OrderAttemptedAt *time.Time `json:"order_attempted_at,omitempty"`
 }
 
 // TaskPayloadItem 快照里的一行（价格是下单当时的映射报价，供事后对账 / 变价告警）。

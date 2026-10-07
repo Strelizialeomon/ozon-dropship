@@ -5,12 +5,18 @@ package purchase
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/store"
 
 	"github.com/shopspring/decimal"
 )
+
+// ErrOrderIncomplete 下单已发生但没完成（如部分商品失败）：**不可重试**——
+// 重试会走「核对补记」把半成品订单洗成已下单，缺的货既没买也不会再报。
+// 适配层把这类结果包成它，Execute 见到就直接进异常池交给人工。
+var ErrOrderIncomplete = errors.New("1688 下单未完成")
 
 // BuyerClient S1-D 需要的 1688 五件套（对应子 spec C §3 的方法清单）。
 type BuyerClient interface {

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -200,7 +201,10 @@ type ozonFulfiller struct {
 }
 
 // ShipPosting 备货：先读 posting 详情拿商品行，再按「单包裹」组装。
-// （S1 单包裹；request 里的 packages 数组是拆多包裹用的，D 的接口不暴露。）
+//
+// S1 的假设：一单一个包裹。店主在 Ozon 后台把单设成多箱（is_multibox / multi_box_qty>1）时，
+// 这个组装会被平台拒（可接受：人看得见）；万一被接受，箱数不对 D 侧复核也看不出来
+// （复核只看 substatus）——多箱拆包留到 S2/S3 跟实际业务一起做（PR #19 轻审 #9）。
 func (f *ozonFulfiller) ShipPosting(ctx context.Context, postingNumber string) error {
 	detail, err := f.c.GetPosting(ctx, postingNumber)
 	if err != nil {
@@ -252,6 +256,17 @@ func (f *ozonFulfiller) GetPackageLabel(ctx context.Context, postingNumber strin
 		if res.Status != nil {
 			switch res.Status.Code {
 			case ozon.LabelTaskCompleted:
+				// ⚠️ completed 只说明「文件生成了」：个别寄件可能没印出来
+				//（unprinted_postings 非空 / printed < postings）——那份 PDF 里没有本单，
+				// 当成功返回会让操作台打印错件（PR #19 轻审 #3）。
+				if len(res.Status.UnprintedPostings) > 0 {
+					first := res.Status.UnprintedPostings[0]
+					return nil, fmt.Errorf("该寄件还没生成面单（%s）：%s", first.PostingNumber, first.Message)
+				}
+				if res.Status.PostingsCount > 0 && res.Status.PrintedPostingsCount < res.Status.PostingsCount {
+					return nil, fmt.Errorf("面单没印全（%d/%d），稍后再试",
+						res.Status.PrintedPostingsCount, res.Status.PostingsCount)
+				}
 				if res.FileURL == "" {
 					return nil, errors.New("面单任务已完成但没有 file_url")
 				}
@@ -284,12 +299,18 @@ func (f *ozonFulfiller) SetTrackingNumber(ctx context.Context, postingNumber, tr
 	if err != nil {
 		return err
 	}
+	// 逐条结果必须**明确有一条 success**：空数组 / 返回别的寄件号都不算成功——
+	// 否则 D 层会把单号记成已回传，而 Ozon 侧从没收到（PR #19 轻审 #4）。
 	for _, r := range results {
-		if r.PostingNumber == postingNumber && !r.OK {
+		if r.PostingNumber != postingNumber {
+			continue
+		}
+		if !r.OK {
 			return fmt.Errorf("平台拒绝该单号: %s", r.Error)
 		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("平台没有回传寄件号 %s 的传单号结果（视为没传成功）", postingNumber)
 }
 
 // ozonFulfillerFactory 装配层注入 shipment 的工厂。
@@ -311,13 +332,28 @@ func ozonFulfillerFactory(limiter *ratelimit.Registry) shipment.FulfillerFactory
 // maxLabelBytes 面单 PDF 大小上限（防给个超大地址把内存打满）。
 const maxLabelBytes = 16 << 20
 
-// downloadURL 下载面单文件（file_url 是 Ozon 给的临时地址）。
+// downloadURL 下载面单文件（file_url 是 Ozon 回传的临时地址）。
+//
+// 这个地址来自**响应体**，不能当可信输入（PR #19 轻审 #8）：
+//   - 只认 https（挡 http://169.254.169.254/… 这类内网 / 元数据地址，SSRF）；
+//   - 不跟跳转（跳转可能把我们带去别处）；
+//   - 超过上限**报错**而不是截断（截断的坏 PDF 当成功更糟）。
 func downloadURL(ctx context.Context, url string) ([]byte, error) {
+	u, err := neturl.Parse(url)
+	if err != nil {
+		return nil, fmt.Errorf("面单地址解析失败: %w", err)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("面单地址不是 https（拒绝下载）: %s", u.Scheme)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("下载面单失败: %w", err)
@@ -326,12 +362,15 @@ func downloadURL(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("下载面单失败: HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLabelBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLabelBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("读面单内容失败: %w", err)
 	}
 	if len(body) == 0 {
 		return nil, errors.New("面单文件是空的")
+	}
+	if len(body) > maxLabelBytes {
+		return nil, fmt.Errorf("面单文件超过 %d 字节上限（拒绝当成功）", maxLabelBytes)
 	}
 	return body, nil
 }
@@ -414,9 +453,11 @@ func (b *alibabaBuyer) CreateOrder(ctx context.Context, req purchase.CreateOrder
 		return nil, errors.New("下单返回里没有 orderId")
 	}
 	if len(res.FailedOfferList) > 0 {
-		// 整体成功但个别商品失败：这是「部分下单」，必须让人看见，不能当成功吞掉。
+		// 整体成功但个别商品失败：下单**已经发生**（订单已建、部分货没买），
+		// 必须让人看见且**不可重试**——重试会走「核对补记」把半成品洗成已下单（PR #19 轻审 #6）。
 		f := res.FailedOfferList[0]
-		return nil, fmt.Errorf("部分商品下单失败（offer %v: %s），需人工核对", f.OfferID, f.ErrorMessage)
+		return nil, fmt.Errorf("%w：订单 %s 部分商品未成功（offer %v: %s），需人工补单或取消",
+			purchase.ErrOrderIncomplete, orderID, f.OfferID, f.ErrorMessage)
 	}
 	return &purchase.BuyerOrder{
 		PlatformOrderID: orderID,
@@ -441,18 +482,37 @@ func (b *alibabaBuyer) GetOrder(ctx context.Context, platformOrderID string) (*p
 	return buyerOrderFromAlibaba(o), nil
 }
 
-// ListBuyerOrders 按时间窗查买家订单（下单防重核对用）。
+// cst 北京时间：1688 网关的时间参数没有时区后缀、按北京时间解读
+// （官方文档示例一律带 +0800；客户端用无时区 layout 原样格式化，所以这里先换到东八区——
+// 直接传 UTC 墙钟会让核对窗口整体前移 8 小时，PR #19 轻审 #2。真实店冒烟复核）。
+var cst = time.FixedZone("CST", 8*3600)
+
+// buyerOrderPageSize 买家订单每页条数（官方默认 50）。
+const buyerOrderPageSize = 50
+
+// buyerOrderMaxPages 翻页上限（防跑飞：50 × 20 = 1000 单，远超单任务核对窗口的合理量）。
+const buyerOrderMaxPages = 20
+
+// ListBuyerOrders 按时间窗查买家订单（下单防重核对用）：**翻页取全**——
+// 只取第一页会让核对窗口里的单落第 2 页时判「没下过单」（PR #19 轻审 #5）。
 func (b *alibabaBuyer) ListBuyerOrders(ctx context.Context, req purchase.ListBuyerOrdersRequest) ([]purchase.BuyerOrder, error) {
-	list, err := b.c.ListBuyerOrders(ctx, alibaba.ListBuyerOrdersRequest{
-		CreateStartTime: req.Since.UTC(),
-		CreateEndTime:   req.To.UTC(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]purchase.BuyerOrder, 0, len(list.Orders))
-	for i := range list.Orders {
-		out = append(out, *buyerOrderFromAlibaba(&list.Orders[i]))
+	out := make([]purchase.BuyerOrder, 0)
+	for page := 1; page <= buyerOrderMaxPages; page++ {
+		list, err := b.c.ListBuyerOrders(ctx, alibaba.ListBuyerOrdersRequest{
+			CreateStartTime: req.Since.In(cst),
+			CreateEndTime:   req.To.In(cst),
+			Page:            page,
+			PageSize:        buyerOrderPageSize,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range list.Orders {
+			out = append(out, *buyerOrderFromAlibaba(&list.Orders[i]))
+		}
+		if len(list.Orders) < buyerOrderPageSize || int64(len(out)) >= list.TotalRecord {
+			return out, nil
+		}
 	}
 	return out, nil
 }
@@ -467,6 +527,7 @@ func (b *alibabaBuyer) GetLogistics(ctx context.Context, platformOrderID string)
 	if err != nil {
 		return nil, err
 	}
+	// 一单多运单时只取第一条（S1 场景一单一运单；S3 做轨迹深化时再扩成多段）。
 	out := &purchase.Logistics{}
 	if len(lg.Infos) > 0 {
 		out.Carrier = lg.Infos[0].LogisticsCompanyName
@@ -493,7 +554,7 @@ func buyerOrderFromAlibaba(o *alibaba.Order) *purchase.BuyerOrder {
 	out := &purchase.BuyerOrder{
 		PlatformOrderID: string(base.ID),
 		OutOrderID:      base.OutOrderID,
-		Amount:          base.TotalAmount,
+		Amount:          orderAmount(o),
 		Currency:        "CNY",
 		Status:          base.Status,
 	}
@@ -516,10 +577,14 @@ func buyerOrderFromAlibaba(o *alibaba.Order) *purchase.BuyerOrder {
 // parseFlexibleTime 1688 轨迹时间是字符串（"2026-10-07 12:00:00" 一类），
 // 解析不了就返回零值（轨迹时间不进判定）。
 func parseFlexibleTime(s string) time.Time {
-	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05"} {
-		if t, err := time.ParseInLocation(layout, strings.TrimSpace(s), time.UTC); err == nil {
+	// 无时区后缀的按北京时间解（1688 的墙钟是东八区，PR #19 轻审 #10）。
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if t, err := time.ParseInLocation(layout, strings.TrimSpace(s), cst); err == nil {
 			return t.UTC()
 		}
+	}
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(s)); err == nil {
+		return t.UTC()
 	}
 	return time.Time{}
 }
@@ -530,6 +595,16 @@ func parseOrderID(s string) (uint64, error) {
 		return 0, fmt.Errorf("订单号 %q 不是 1688 订单 id: %w", s, err)
 	}
 	return id, nil
+}
+
+// orderAmount 记账金额取**实付**（Σ tradeTerms[].phasAmount，S1-C 专门为此提供 PaidAmount）；
+// 还没有付款记录（tradeTerms 空）时退回应付款总额——拿到 PaidAmount 的当天，
+// MarkPaid 的「GetOrder 核对」才不会再报伪差异（PR #19 轻审 #7）。
+func orderAmount(o *alibaba.Order) decimal.Decimal {
+	if paid := o.PaidAmount(); paid.GreaterThan(decimal.Zero) {
+		return paid
+	}
+	return o.BaseInfo.TotalAmount
 }
 
 // centsToYuan 1688 预览/下单响应的金额单位是「分」（官方字段说明）。

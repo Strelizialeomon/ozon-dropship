@@ -331,6 +331,21 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 	if found != nil {
 		return s.recordOrdered(ctx, task, found, "核对补记：1688 已有该任务的买家订单，不再下单")
 	}
+	// 核对不到、但载荷里记着「已经尝试下过单」：消息可能丢了、平台也可能没回传 outOrderId。
+	// 这时**不重复下单**（重复采购要花钱），转异常池让人去 1688 后台核一眼。
+	if pay.OrderAttemptedAt != nil {
+		if ok, err := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusExecuting, StatusPending}, StatusException); err != nil {
+			return err
+		} else if ok {
+			s.raise(ctx, order.RefPurchaseTask, task.ID, order.CodeAlibabaOrderFailed,
+				"无法确认是否已在 1688 下单（核对不到买家订单；下单尝试时间 "+pay.OrderAttemptedAt.UTC().Format(time.RFC3339)+"）——已停在此处待人工核对，不重复下单")
+			s.audit.Record(ctx, audit.Entry{
+				Action: "purchase_task.order_unconfirmed", Object: "purchase_task:" + task.ID,
+				Detail: mustJSON(map[string]any{"order_id": o.ID, "attempted_at": pay.OrderAttemptedAt}),
+			})
+		}
+		return nil
+	}
 
 	// 3) 预览：新商家 / 地址问题在这里分流。
 	addr := Address{Name: pay.RelayName, Phone: contactPhone(pay.RelayContact), Address: pay.RelayAddress}
@@ -358,8 +373,19 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 		}
 	}
 
-	// 4) 下单。买家留言带 posting_number + 任务标记（中转点认包用前者）；
+	// 4) 下单前先落「已尝试」标记（崩溃/回包丢失后靠它决定「不重复下单、转人工」），再下单。
+	//    买家留言带 posting_number + 任务标记（中转点认包用前者）；
 	//    OutOrderID 是防重核对的权威凭据（1688 幂等字段）。
+	attemptedAt := s.now().UTC()
+	pay.OrderAttemptedAt = &attemptedAt
+	if raw, merr := json.Marshal(pay); merr == nil {
+		if err := s.repo.UpdateFields(ctx, task.ID, map[string]any{"payload": raw}); err != nil {
+			return s.retryOrFail(ctx, task, fmt.Errorf("落下单尝试标记失败: %w", err))
+		}
+	} else {
+		return s.retryOrFail(ctx, task, fmt.Errorf("序列化任务载荷失败: %w", merr))
+	}
+
 	bo, err := buyer.CreateOrder(ctx, CreateOrderRequest{
 		ItemID:     req.ItemID,
 		SkuID:      req.SkuID,
@@ -370,6 +396,15 @@ func (s *Service) Execute(ctx context.Context, taskID string) error {
 		OutOrderID: TradeRemark(o.PostingNumber, task.ID),
 	})
 	if err != nil {
+		// 部分商品失败这类「下单已发生但没完成」不能重试：重试会被核对路径洗成已下单。
+		if errors.Is(err, ErrOrderIncomplete) {
+			if ok, serr := s.repo.SetStatusFrom(ctx, task.ID, []string{StatusExecuting, StatusPending}, StatusException); serr != nil {
+				return serr
+			} else if ok {
+				s.raise(ctx, order.RefPurchaseTask, task.ID, order.CodeAlibabaOrderFailed, err.Error())
+			}
+			return nil
+		}
 		return s.retryOrFail(ctx, task, fmt.Errorf("1688 下单失败: %w", err))
 	}
 	return s.recordOrdered(ctx, task, bo, "自动下单成功")
@@ -423,11 +458,12 @@ func (s *Service) closeForTerminalOrder(ctx context.Context, task *PurchaseTask,
 
 // findPlacedOrder 查买家订单里是否已有**本任务**的单。
 //
-// 两级匹配：
-//  1. OutOrderID 精确相等（权威：下单时就带上了本任务的标记）；
-//  2. 回退到买家留言同时含 posting_number 与任务标记（老数据 / 平台没回传 OutOrderID 时）。
+// 只按 OutOrderID 精确匹配（下单时带上的 `posting#任务标记`）：
+//   - 只认 posting 会把兄弟任务的单认领走（重审 #1）；
+//   - 留言字符串匹配是死路：1688 的订单结构里没有「买家留言」字段，
+//     适配层填不出 Remark（PR #19 轻审 #1），所以不留这条回退。
 //
-// 只认 posting 会把兄弟任务的单认领走（重审 #1），两级都要求「任务」这一维。
+// 核对不到时的处置在 Execute 里：**已尝试过下单就不重复下单**，转异常池让人核。
 func (s *Service) findPlacedOrder(ctx context.Context, buyer BuyerClient, task *PurchaseTask, o *order.Order) (*BuyerOrder, error) {
 	since := task.CreatedAt.Add(-time.Hour) // 往前留一小时余量（时钟与入库延迟）
 	list, err := buyer.ListBuyerOrders(ctx, ListBuyerOrdersRequest{Since: since, To: s.now()})
@@ -435,17 +471,8 @@ func (s *Service) findPlacedOrder(ctx context.Context, buyer BuyerClient, task *
 		return nil, err
 	}
 	want := TradeRemark(o.PostingNumber, task.ID)
-	tag := tradeTag(task.ID)
 	for i := range list {
 		if list[i].OutOrderID != "" && list[i].OutOrderID == want {
-			return &list[i], nil
-		}
-	}
-	for i := range list {
-		if o.PostingNumber == "" {
-			continue
-		}
-		if strings.Contains(list[i].Remark, o.PostingNumber) && strings.Contains(list[i].Remark, tag) {
 			return &list[i], nil
 		}
 	}
