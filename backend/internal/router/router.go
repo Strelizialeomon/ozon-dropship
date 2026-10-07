@@ -2,10 +2,16 @@
 package router
 
 import (
+	"errors"
+
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/auth"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/catalog"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/audit"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/queue"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/middleware"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/order"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/purchase"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/shipment"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/store"
 
 	"github.com/alexedwards/scs/v2"
@@ -25,11 +31,24 @@ type Deps struct {
 	Credentials *store.CredentialHandler
 	System      *store.SystemHandler
 
+	// S1-D 履约编排
+	Orders        *order.Handler
+	Exceptions    *order.ExceptionHandler
+	PurchaseTasks *purchase.Handler
+	Catalog       *catalog.Handler
+	Shipments     *shipment.Handler
+
 	Queue *queue.Client
 }
 
 // Setup 组装 gin 引擎。中间件顺序：Recovery 最外层 → 请求日志 → 会话 → 业务链。
+// 缺域直接报错：装配漏了要当场炸，不能静默少一半路由（404 只有上线才发现）。
 func Setup(d Deps) (*gin.Engine, error) {
+	if d.Auth == nil || d.Stores == nil || d.Credentials == nil || d.System == nil ||
+		d.Orders == nil || d.Exceptions == nil || d.PurchaseTasks == nil ||
+		d.Catalog == nil || d.Shipments == nil || d.Queue == nil {
+		return nil, errors.New("路由装配缺少依赖（auth / stores / credentials / system / orders / exceptions / purchase-tasks / catalog / shipments / queue）")
+	}
 	if d.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	} else {
@@ -61,6 +80,13 @@ func Setup(d Deps) (*gin.Engine, error) {
 	d.Stores.Register(authed)
 	d.Credentials.Register(authed)
 	d.System.Register(authed)
+
+	// S1-D：订单 / 异常池 / 采购任务台 / 映射与报价 / 打包交接（+ 中转点）
+	d.Orders.Register(authed)
+	d.Exceptions.Register(authed)
+	d.PurchaseTasks.Register(authed)
+	d.Catalog.Register(authed)
+	d.Shipments.Register(authed)
 
 	// 仅管理员
 	admin := authed.Group("/admin")
