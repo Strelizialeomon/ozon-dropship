@@ -274,23 +274,37 @@ func AuditWrite(rec *audit.Recorder) gin.HandlerFunc {
 
 		capture := &bodyCapture{ResponseWriter: c.Writer, limit: 1024}
 		c.Writer = capture
-		c.Next()
 
-		detail, _ := json.Marshal(map[string]any{
-			"http_status": capture.Status(),
-			"code":        capture.bizCode(),
-			"query":       c.Request.URL.RawQuery,
-		})
-		actor := UserNameOf(c)
-		if actor == "" {
-			actor = "anonymous" // 未登录就发写请求：记 anonymous，别混进 system（后台任务才叫 system）
-		}
-		rec.Record(c.Request.Context(), audit.Entry{
-			Actor:  actor,
-			Action: strings.ToLower(m) + " " + c.FullPath(),
-			Object: c.Request.URL.Path,
-			Detail: string(detail),
-		})
+		// 用 defer 记录：handler panic 时这条审计也不能丢（panic 继续上抛给 Recovery 兜）。
+		defer func() {
+			panicked := recover()
+			httpStatus := capture.Status()
+			code := capture.bizCode()
+			if panicked != nil {
+				httpStatus = http.StatusInternalServerError
+				code = -1
+			}
+			detail, _ := json.Marshal(map[string]any{
+				"http_status": httpStatus,
+				"code":        code,
+				"query":       c.Request.URL.RawQuery,
+				"panicked":    panicked != nil,
+			})
+			actor := UserNameOf(c)
+			if actor == "" {
+				actor = "anonymous" // 未登录就发写请求：记 anonymous，别混进 system（后台任务才叫 system）
+			}
+			rec.Record(c.Request.Context(), audit.Entry{
+				Actor:  actor,
+				Action: strings.ToLower(m) + " " + c.FullPath(),
+				Object: c.Request.URL.Path,
+				Detail: string(detail),
+			})
+			if panicked != nil {
+				panic(panicked) // 留给 Recovery（最外层）处理
+			}
+		}()
+		c.Next()
 	}
 }
 

@@ -31,10 +31,12 @@ type DatabaseConfig struct {
 	Database string `mapstructure:"database"`
 }
 
-// DSN 生成 MySQL 连接串。loc=UTC：时间列全按 UTC 读写（总纲 §6：时间一律按 UTC 存），
-// 与 Go 进程时区、MySQL 服务器时区解耦。
+// DSN 生成 MySQL 连接串。
+// loc=UTC：驱动侧把时间列按 UTC 解释（总纲 §6：时间一律按 UTC 存）；
+// time_zone='+00:00'：把会话时区也钉成 UTC——否则 `DEFAULT CURRENT_TIMESTAMP(3)`
+// 这类由 MySQL 侧生成的默认值会按服务器本地时区写，非 UTC 服务器上会整体偏时差。
 func (c *DatabaseConfig) DSN() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=UTC",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=UTC&time_zone=%%27%%2B00%%3A00%%27",
 		c.Username, c.Password, c.Host, c.Port, c.Database)
 }
 

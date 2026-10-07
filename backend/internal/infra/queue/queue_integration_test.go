@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,6 +116,58 @@ func TestEnqueueIdempotencyKeyDedupes(t *testing.T) {
 	}
 	if info.Pending != 1 {
 		t.Fatalf("同幂等键应只留 1 条待处理，实际 %d", info.Pending)
+	}
+}
+
+// 回归（曾判「严重」）：任务归档后同幂等键再也投不进去——
+// 补投扫描必须能识别死记录、清掉后重投，否则卡住的业务记录永远补投不出去。
+func TestEnqueueRevivesArchivedTask(t *testing.T) {
+	_ = testutil.Redis(t)
+	q := testClient(t, 0) // 0 次重试：失败即归档
+
+	var shouldFail atomic.Bool
+	shouldFail.Store(true)
+	done := make(chan string, 4)
+	q.Handle("revive", func(_ context.Context, task *asynq.Task) error {
+		if shouldFail.Load() {
+			return errors.New("先炸一次，让它进归档")
+		}
+		done <- string(task.Payload())
+		return nil
+	})
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer q.Shutdown()
+
+	ctx := context.Background()
+	task := Task{Type: "revive", Payload: []byte(`{"n":1}`), IdempotencyKey: "revive-key-1"}
+	if err := q.Enqueue(ctx, task); err != nil {
+		t.Fatalf("首次入队: %v", err)
+	}
+
+	// 等它进归档。
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		info, err := q.Inspector().GetQueueInfo("default")
+		if err == nil && info.Archived == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("任务没有进归档，前置条件不成立")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 修好之后用同一个幂等键补投：应当清掉死记录、重新执行。
+	shouldFail.Store(false)
+	if err := q.Enqueue(ctx, task); err != nil {
+		t.Fatalf("归档后同键补投应成功（清死记录重投），实际: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("归档后的任务没有被成功重投执行")
 	}
 }
 

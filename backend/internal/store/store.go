@@ -88,9 +88,30 @@ func (r *Repo) Create(ctx context.Context, s *Shop) error {
 	return r.db.WithContext(ctx).Create(s).Error
 }
 
-// Update 存整行。
+// Update 保存店铺的可改字段。
+// 带 del_flag=false 条件（不用 Save 存整行）：与删除并发时，Save 会把 del_flag
+// 一起写回 false，把刚删掉的店「写活」；条件更新 0 行即返回 ErrShopNotFound。
 func (r *Repo) Update(ctx context.Context, s *Shop) error {
-	return r.db.WithContext(ctx).Save(s).Error
+	res := r.db.WithContext(ctx).Model(&Shop{}).
+		Where("id = ? AND del_flag = ?", s.ID, false).
+		Updates(map[string]any{
+			"name":                   s.Name,
+			"mode":                   s.Mode,
+			"client_id":              s.ClientID,
+			"currency":               s.Currency,
+			"default_relay_point_id": s.DefaultRelayPointID,
+			"push_enabled":           s.PushEnabled,
+			"ship_early":             s.ShipEarly,
+			"status":                 s.Status,
+			"updated_at":             time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrShopNotFound
+	}
+	return nil
 }
 
 // SoftDelete 软删。
@@ -214,12 +235,20 @@ func (h *Handler) Update(c *gin.Context) {
 	s.Status = orDefault(req.Status, s.Status)
 
 	if err := h.repo.Update(ctx, s); err != nil {
-		if isDuplicate(err) {
+		switch {
+		case errors.Is(err, ErrShopNotFound):
+			// 加载后、保存前被别人删了。
+			utils.FailWithCode(c, utils.CodeNotFound, "店铺不存在（可能刚被删除）", nil, nil)
+		case isDuplicate(err):
 			utils.FailWithCode(c, utils.CodeConflict, "店铺名已存在", nil, nil)
-			return
+		default:
+			utils.ServerError(c, "更新店铺失败", err)
 		}
-		utils.ServerError(c, "更新店铺失败", err)
 		return
+	}
+	// 回读一次：拿更新后的 updated_at，响应不糊弄。
+	if fresh, err := h.repo.ByID(ctx, s.ID); err == nil {
+		s = fresh
 	}
 	h.audit.Record(ctx, audit.Entry{
 		Action: "store.update", Object: "store:" + s.ID,

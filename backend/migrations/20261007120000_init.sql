@@ -19,8 +19,10 @@ CREATE TABLE stores (
     created_at             DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at             DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag               TINYINT(1)   NOT NULL DEFAULT 0,
+    -- 唯一性只约束「存活行」：软删行取 NULL 不参与，删掉同名店后可以重新用这个名字
+    alive_name             VARCHAR(128) GENERATED ALWAYS AS (IF(del_flag = 0, name, NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_stores_name (name),
+    UNIQUE KEY uk_stores_alive_name (alive_name),
     KEY idx_stores_status (status)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT 'Ozon 店铺';
 -- +goose StatementEnd
@@ -36,8 +38,9 @@ CREATE TABLE relay_points (
     created_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag   TINYINT(1)   NOT NULL DEFAULT 0,
+    alive_name VARCHAR(128) GENERATED ALWAYS AS (IF(del_flag = 0, name, NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_relay_points_name (name)
+    UNIQUE KEY uk_relay_points_alive_name (alive_name)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '中转点（总纲 §5.7）';
 -- +goose StatementEnd
 
@@ -55,11 +58,12 @@ CREATE TABLE credentials (
     created_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag         TINYINT(1)  NOT NULL DEFAULT 0,
-    -- store_id 为 NULL 的行在 MySQL 唯一索引里不去重，改用生成列把 NULL 归成空串，
-    -- 保证「每种 kind 至多一行」对企业级凭据同样成立（总纲 §6）。
-    store_key        VARCHAR(32) GENERATED ALWAYS AS (IFNULL(store_id, '')) STORED,
+    -- 唯一性只约束「存活行」，且把 store_id 的 NULL 归成空串——
+    -- 保证「每种 kind 至多一行」对企业级凭据同样成立（总纲 §6），
+    -- 同时软删后可重新录入（软删行的生成列取 NULL，不参与唯一）。
+    alive_scope      VARCHAR(80) GENERATED ALWAYS AS (IF(del_flag = 0, CONCAT(IFNULL(store_id, ''), '|', kind), NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_credentials_scope (store_key, kind)
+    UNIQUE KEY uk_credentials_alive_scope (alive_scope)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '凭据（总纲 §5.4/§5.8）';
 -- +goose StatementEnd
 
@@ -98,8 +102,10 @@ CREATE TABLE offer_links (
     created_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at        DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag          TINYINT(1)  NOT NULL DEFAULT 0,
+    -- 唯一键只约束存活行（软删后可重新挂同一 trio）
+    alive_key         VARCHAR(224) GENERATED ALWAYS AS (IF(del_flag = 0, CONCAT(store_id, '|', ozon_offer_id, '|', supplier_offer_id), NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_offer_links (store_id, ozon_offer_id, supplier_offer_id),
+    UNIQUE KEY uk_offer_links_alive (alive_key),
     KEY idx_offer_links_offer (store_id, ozon_offer_id, priority)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '按店货源映射（总纲 §5.3）';
 -- +goose StatementEnd
@@ -162,8 +168,9 @@ CREATE TABLE purchase_tasks (
     created_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at        DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag          TINYINT(1)   NOT NULL DEFAULT 0,
+    alive_idem        VARCHAR(128) GENERATED ALWAYS AS (IF(del_flag = 0, idempotency_key, NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_purchase_tasks_idem (idempotency_key),
+    UNIQUE KEY uk_purchase_tasks_alive_idem (alive_idem),
     KEY idx_purchase_tasks_order (order_id),
     KEY idx_purchase_tasks_status (status, updated_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '采购任务（总纲 §5.1）';
@@ -255,8 +262,9 @@ CREATE TABLE users (
     created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     del_flag      TINYINT(1)  NOT NULL DEFAULT 0,
+    alive_name    VARCHAR(64) GENERATED ALWAYS AS (IF(del_flag = 0, name, NULL)) STORED,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_users_name (name)
+    UNIQUE KEY uk_users_alive_name (alive_name)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '操作台用户（总纲 §6）';
 -- +goose StatementEnd
 

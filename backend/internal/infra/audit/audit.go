@@ -39,6 +39,31 @@ type Entry struct {
 	Detail string // JSON 字符串（前后差异等）
 }
 
+// 列宽上限（与迁移 DDL 一致）；detail 是 TEXT，留余量。
+const (
+	maxActor  = 128
+	maxAction = 64
+	maxObject = 128
+	maxDetail = 60000
+)
+
+// truncateRunes 按「字符」截断（不是字节），保证不把多字节字符劈一半，
+// 且**总长不超过 n 个字符**（省略号也计入）：列宽按字符算，多一个 "…" 照样 1406。
+// 审计宁可截断也不能整条插不进——一次 MySQL 1406 就会把这条记录彻底抹掉。
+func truncateRunes(s string, n int) string {
+	if len(s) <= n { // 字节数不超上限 → 字符数必然也不超（ASCII 快路径）
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return string(r[:n])
+	}
+	return string(r[:n-1]) + "…"
+}
+
 // Recorder 审计记录器。
 type Recorder struct {
 	db *gorm.DB
@@ -58,10 +83,10 @@ func (r *Recorder) Record(ctx context.Context, e Entry) {
 	}
 	row := AuditLog{
 		ID:     newID(),
-		Actor:  e.Actor,
-		Action: e.Action,
-		Object: e.Object,
-		Detail: e.Detail,
+		Actor:  truncateRunes(e.Actor, maxActor),
+		Action: truncateRunes(e.Action, maxAction),
+		Object: truncateRunes(e.Object, maxObject),
+		Detail: truncateRunes(e.Detail, maxDetail),
 		At:     time.Now().UTC(),
 	}
 	if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {

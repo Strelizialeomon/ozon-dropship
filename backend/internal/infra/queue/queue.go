@@ -61,14 +61,15 @@ type Client struct {
 	server    *asynq.Server
 	scheduler *asynq.Scheduler
 	mux       *asynq.ServeMux
+	inspector *asynq.Inspector
 
 	mu    sync.Mutex
 	rules []RescanRule
 
-	started  bool
-	stop     chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	started      bool
+	stop         chan struct{}
+	shutdownOnce sync.Once
+	wg           sync.WaitGroup
 }
 
 // New 构造；不启动。装配序列：New → Handle/RegisterRescan/RegisterCron → Start。
@@ -88,23 +89,17 @@ func New(cfg Config) *Client {
 	opt := asynq.RedisClientOpt{Addr: cfg.RedisAddr, Password: cfg.RedisPassword, DB: cfg.RedisDB}
 
 	c := &Client{
-		cfg:      cfg,
-		redisOpt: opt,
-		client:   asynq.NewClient(opt),
-		mux:      asynq.NewServeMux(),
-		stop:     make(chan struct{}),
+		cfg:       cfg,
+		redisOpt:  opt,
+		client:    asynq.NewClient(opt),
+		mux:       asynq.NewServeMux(),
+		inspector: asynq.NewInspector(opt),
+		stop:      make(chan struct{}),
 	}
 
 	c.server = asynq.NewServer(opt, asynq.Config{
-		Concurrency: cfg.Concurrency,
-		RetryDelayFunc: func(n int, _ error, _ *asynq.Task) time.Duration {
-			// n 是已重试次数（1 起）：base × 2^(n-1)，上限 5 分钟
-			d := cfg.RetryBackoff * time.Duration(1<<uint(n-1))
-			if d > 5*time.Minute {
-				d = 5 * time.Minute
-			}
-			return d
-		},
+		Concurrency:    cfg.Concurrency,
+		RetryDelayFunc: func(n int, _ error, _ *asynq.Task) time.Duration { return retryDelay(cfg.RetryBackoff, n) },
 		ErrorHandler: errorHandler{c: c},
 	})
 
@@ -116,11 +111,28 @@ func New(cfg Config) *Client {
 	return c
 }
 
+// retryDelay 第 n 次重试前的等待：base × 2^n，上限 5 分钟。
+// n = 已重试次数，asynq 首次失败传 0（v0.26 processor.go）→ 首次等 base。
+// ⚠️ 别写成 2^(n-1)：n=0 时 uint 下溢，第一次重试会立刻重发（差一位的退避）。
+func retryDelay(base time.Duration, n int) time.Duration {
+	if n < 0 {
+		n = 0
+	}
+	if n > 20 { // 2^20 × base 早已越过 5 分钟上限；再大位移会溢出成 0
+		n = 20
+	}
+	d := base * time.Duration(1<<uint(n))
+	if d > 5*time.Minute {
+		d = 5 * time.Minute
+	}
+	return d
+}
+
 // RedisConnOpt 暴露 Redis 连接参数（asynqmon 监控页要用）。
 func (c *Client) RedisConnOpt() asynq.RedisClientOpt { return c.redisOpt }
 
 // Inspector asynq 检查器（/api/system 读队列积压与失败任务）。
-func (c *Client) Inspector() *asynq.Inspector { return asynq.NewInspector(c.redisOpt) }
+func (c *Client) Inspector() *asynq.Inspector { return c.inspector }
 
 // Handle 注册任务处理器（Start 之前调用）。
 func (c *Client) Handle(pattern string, h asynq.HandlerFunc) { c.mux.Handle(pattern, h) }
@@ -134,13 +146,48 @@ func (c *Client) Enqueue(ctx context.Context, t Task, opts ...asynq.Option) erro
 	if t.Queue != "" {
 		base = append(base, asynq.Queue(t.Queue))
 	}
-	_, err := c.client.EnqueueContext(ctx, asynq.NewTask(t.Type, t.Payload), append(base, opts...)...)
-	// 幂等：asynq 对「同 TaskID」不是静默丢弃而是报 ErrTaskIDConflict——
-	// 对补投扫描来说这正说明任务已在队里，视作成功。
-	if err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
-		return fmt.Errorf("入队 %s 失败: %w", t.Type, err)
+	finalOpts := append(base, opts...)
+	_, err := c.client.EnqueueContext(ctx, asynq.NewTask(t.Type, t.Payload), finalOpts...)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// 幂等：asynq 对「同 TaskID」不是静默丢弃而是报 ErrTaskIDConflict。
+	// 但要分辨冲突对象是死是活——见 resolveConflict。
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return c.resolveConflict(ctx, t, finalOpts)
+	}
+	return fmt.Errorf("入队 %s 失败: %w", t.Type, err)
+}
+
+// resolveConflict 同幂等键已在 asynq 里：查它当前状态。
+//   - 在队 / 执行中（pending/active/scheduled/retry/aggregating）→ 幂等重复，视作成功；
+//   - 已归档 / 已完成 → 死记录占着 key（归档记录会保留很久），必须先清掉再重投，
+//     否则这条业务记录永远补投不出去（补投扫描的最大承诺就断了）。
+//
+// 查不到状态（Redis 抖动）时不冒险删任务，按「已在队」处理、记 error 日志，等下一轮扫描。
+func (c *Client) resolveConflict(ctx context.Context, t Task, opts []asynq.Option) error {
+	queueName := t.Queue
+	if queueName == "" {
+		queueName = "default"
+	}
+	info, err := c.inspector.GetTaskInfo(queueName, t.IdempotencyKey)
+	if err != nil {
+		logger.Errorf("[queue] 幂等键 %s 冲突但查不到状态（按在队处理，等下轮补投）: %v", t.IdempotencyKey, err)
+		return nil
+	}
+	switch info.State {
+	case asynq.TaskStateArchived, asynq.TaskStateCompleted:
+		logger.Warnf("[queue] 幂等键被死任务占用（%s），清除后重投 id=%s type=%s", info.State, t.IdempotencyKey, t.Type)
+		if err := c.inspector.DeleteTask(queueName, t.IdempotencyKey); err != nil {
+			return fmt.Errorf("清除死任务 %s 失败: %w", t.IdempotencyKey, err)
+		}
+		if _, err := c.client.EnqueueContext(ctx, asynq.NewTask(t.Type, t.Payload), opts...); err != nil {
+			return fmt.Errorf("清除死任务后重投 %s 失败: %w", t.Type, err)
+		}
+		return nil
+	default:
+		return nil // 在队 / 执行中：幂等重复
+	}
 }
 
 // RegisterRescan 注册补投规则。
@@ -190,14 +237,14 @@ func (c *Client) Start(_ context.Context) error {
 }
 
 // Shutdown 优雅退出：先停扫描（停止生产），再停 worker（跑完在途任务）。
-// 幂等：重复调用只有第一次完整执行。
+// 幂等且并发安全：整个停机流程进一个 sync.Once（信号处理与 defer 同时触发也只停一次）。
 func (c *Client) Shutdown() {
-	c.mu.Lock()
-	started := c.started
-	c.started = false
-	c.mu.Unlock()
+	c.shutdownOnce.Do(func() {
+		c.mu.Lock()
+		started := c.started
+		c.started = false
+		c.mu.Unlock()
 
-	c.stopOnce.Do(func() {
 		if started {
 			close(c.stop)
 			c.wg.Wait()
@@ -205,6 +252,7 @@ func (c *Client) Shutdown() {
 			c.server.Shutdown()
 		}
 		_ = c.client.Close()
+		_ = c.inspector.Close()
 		logger.L().Info("queue stopped")
 	})
 }

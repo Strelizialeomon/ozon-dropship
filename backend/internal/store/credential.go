@@ -147,6 +147,11 @@ func (s *CredentialService) Get(ctx context.Context, storeID, kind string) (*Dec
 
 // Put 录入或轮换（同店同 kind 覆盖；覆盖即轮换，记 rotated_at 并复位告警档）。
 // 保险箱未启用时拒绝写入（绝不落明文）。
+//
+// expires_at 语义：nil = 保留原有到期时间（轮换换新 key 但一时不知道新到期日时，
+// 不能把原值抹成 NULL——抹掉就等于该凭据从此不进到期告警）。要清除到期时间需显式改库。
+//
+// 并发安全：两个人/两次点击同时 Put，输的一方撞唯一键后改为走更新路径（不报 500）。
 func (s *CredentialService) Put(ctx context.Context, storeID, kind string, payload map[string]string, expiresAt *time.Time) (*Meta, error) {
 	if !s.vault.Enabled() {
 		return nil, vault.ErrDisabled
@@ -159,59 +164,78 @@ func (s *CredentialService) Put(ctx context.Context, storeID, kind string, paylo
 		return nil, err
 	}
 	masked := maskValue(payload[kindPrimaryField[kind]])
-	now := time.Now().UTC()
 
 	existing, err := s.find(ctx, storeID, kind)
 	switch {
 	case err == nil:
-		enc, err := s.vault.Encrypt(plain, vault.AADFor(tableCredentials, existing.ID))
-		if err != nil {
-			return nil, fmt.Errorf("加密失败: %w", err)
-		}
-		updates := map[string]any{
-			"secret_enc":         enc,
-			"masked_tail":        masked,
-			"expires_at":         expiresAt,
-			"rotated_at":         now,
-			"expiry_alert_stage": 0, // 轮换开新一轮告警
-		}
-		if err := s.db.WithContext(ctx).Model(&Credential{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-			return nil, err
-		}
-		s.audit.Record(ctx, audit.Entry{
-			Action: "credential.rotate", Object: "credential:" + existing.ID,
-			Detail: mustJSON(map[string]string{"store_id": storeID, "kind": kind, "masked": masked}),
-		})
-		return s.metaByID(ctx, existing.ID)
+		return s.applyRotation(ctx, existing.ID, storeID, kind, plain, masked, expiresAt)
 	case errors.Is(err, ErrCredentialNotFound):
-		id := snowflake.GenStringID()
-		enc, err := s.vault.Encrypt(plain, vault.AADFor(tableCredentials, id))
-		if err != nil {
-			return nil, fmt.Errorf("加密失败: %w", err)
-		}
-		row := &Credential{
-			ID:        id,
-			StoreID:   nullableStoreID(storeID),
-			Kind:      kind,
-			SecretEnc: enc,
-			MaskedTail: masked,
-			ExpiresAt: expiresAt,
-			RotatedAt: &now,
-		}
-		if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
-			if isDuplicate(err) {
-				return nil, fmt.Errorf("同店同种类的凭据已存在（并发写入）")
-			}
-			return nil, err
-		}
-		s.audit.Record(ctx, audit.Entry{
-			Action: "credential.create", Object: "credential:" + id,
-			Detail: mustJSON(map[string]string{"store_id": storeID, "kind": kind, "masked": masked}),
-		})
-		return s.metaByID(ctx, id)
+		return s.create(ctx, storeID, kind, plain, masked, expiresAt)
 	default:
 		return nil, err
 	}
+}
+
+// create 新建凭据行；撞唯一键（并发创建）时转更新路径。
+func (s *CredentialService) create(ctx context.Context, storeID, kind string, plain []byte, masked string, expiresAt *time.Time) (*Meta, error) {
+	id := snowflake.GenStringID()
+	enc, err := s.vault.Encrypt(plain, vault.AADFor(tableCredentials, id))
+	if err != nil {
+		return nil, fmt.Errorf("加密失败: %w", err)
+	}
+	now := time.Now().UTC()
+	row := &Credential{
+		ID:         id,
+		StoreID:    nullableStoreID(storeID),
+		Kind:       kind,
+		SecretEnc:  enc,
+		MaskedTail: masked,
+		ExpiresAt:  expiresAt,
+		RotatedAt:  &now,
+	}
+	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+		if isDuplicate(err) {
+			// 并发：别人刚建好 → 重查出来走更新（本次写入不丢、也不给用户 500）
+			live, ferr := s.find(ctx, storeID, kind)
+			if ferr != nil {
+				return nil, fmt.Errorf("并发写入后重查失败: %w", ferr)
+			}
+			return s.applyRotation(ctx, live.ID, storeID, kind, plain, masked, expiresAt)
+		}
+		return nil, err
+	}
+	s.audit.Record(ctx, audit.Entry{
+		Action: "credential.create", Object: "credential:" + id,
+		Detail: mustJSON(map[string]string{"store_id": storeID, "kind": kind, "masked": masked}),
+	})
+	return s.metaByID(ctx, id)
+}
+
+// applyRotation 覆盖既有行的密文（轮换）：
+// 换密文、换尾号、记 rotated_at；只有显式给了新 expires_at 才动到期时间并复位告警档。
+func (s *CredentialService) applyRotation(ctx context.Context, rowID, storeID, kind string, plain []byte, masked string, expiresAt *time.Time) (*Meta, error) {
+	enc, err := s.vault.Encrypt(plain, vault.AADFor(tableCredentials, rowID))
+	if err != nil {
+		return nil, fmt.Errorf("加密失败: %w", err)
+	}
+	now := time.Now().UTC()
+	updates := map[string]any{
+		"secret_enc":  enc,
+		"masked_tail": masked,
+		"rotated_at":  now,
+	}
+	if expiresAt != nil {
+		updates["expires_at"] = expiresAt
+		updates["expiry_alert_stage"] = 0 // 换了新到期日：开新一轮 14/7/1 告警
+	}
+	if err := s.db.WithContext(ctx).Model(&Credential{}).Where("id = ?", rowID).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	s.audit.Record(ctx, audit.Entry{
+		Action: "credential.rotate", Object: "credential:" + rowID,
+		Detail: mustJSON(map[string]string{"store_id": storeID, "kind": kind, "masked": masked}),
+	})
+	return s.metaByID(ctx, rowID)
 }
 
 // SetExpiry 回写到期时间 / 最近校验时间（Ozon 每天读 /v1/roles、1688 续期后用）。

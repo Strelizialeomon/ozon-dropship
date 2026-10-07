@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -140,7 +141,8 @@ func (n *Notifier) loop() {
 	}
 }
 
-// flushOnce 把当前缓冲合并成一条发出。
+// flushOnce 把当前缓冲合并成一条发出；失败则把内容放回缓冲，下一轮重试
+//（缓冲有上限，持续失败不会无限堆积；进程退出前的最后一次 Flush 失败只记日志）。
 func (n *Notifier) flushOnce(ctx context.Context) {
 	n.mu.Lock()
 	if len(n.buf) == 0 {
@@ -152,7 +154,12 @@ func (n *Notifier) flushOnce(ctx context.Context) {
 	n.mu.Unlock()
 
 	if err := n.send(ctx, text); err != nil {
-		logger.Errorf("[notify] 发送失败: %v", err)
+		logger.Errorf("[notify] 发送失败（下轮重试）: %v", err)
+		n.mu.Lock()
+		if len(n.buf) < maxBuffer {
+			n.buf = append([]string{text}, n.buf...)
+		}
+		n.mu.Unlock()
 	}
 }
 
@@ -183,8 +190,18 @@ func (n *Notifier) send(ctx context.Context, text string) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("飞书返回 HTTP %d", resp.StatusCode)
+		return fmt.Errorf("飞书返回 HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+	// 飞书失败也回 HTTP 200，靠 body 里的 code 判——只看状态码会把
+	//「签名错 / 关键词不匹配」当成功，告警就静默消失了。
+	var r struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(respBody, &r) == nil && r.Code != 0 {
+		return fmt.Errorf("飞书返回 code=%d: %s", r.Code, r.Msg)
 	}
 	return nil
 }

@@ -189,11 +189,10 @@ func (r *Registry) limiters(scope, subject, endpoint string) (total, ep *rate.Li
 	if sc.DefaultRPS > 0 {
 		total = r.buckets[totalKey]
 		if total == nil {
-			burst := int(math.Ceil(sc.DefaultRPS))
-			if burst < 1 {
-				burst = 1
-			}
-			total = rate.NewLimiter(rate.Limit(sc.DefaultRPS), burst)
+			// burst 固定 1（不是 RPS）：令牌桶 burst=N 时，1 秒滚动窗口最多能发 ~2N 次
+			//（先连发 N 个、再按速率回填 N 个）——上游按秒窗口计数时这就是 ~2× 超限。
+			// 宁可严格匀速（每次最多多等 1/rps 秒），也别去撞 429。
+			total = rate.NewLimiter(rate.Limit(sc.DefaultRPS), 1)
 			r.buckets[totalKey] = total
 		}
 	}

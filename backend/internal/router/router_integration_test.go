@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/auth"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/audit"
@@ -35,6 +36,11 @@ type testEnv struct {
 }
 
 func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	return newTestEnvWithLimiter(t, nil)
+}
+
+func newTestEnvWithLimiter(t *testing.T, lim *auth.LoginLimiter) *testEnv {
 	t.Helper()
 	if err := snowflake.Init(1); err != nil {
 		t.Fatalf("snowflake: %v", err)
@@ -67,7 +73,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Session:     sm,
 		ResolveUser: authRepo.Resolve,
 		Audit:       rec,
-		Auth:        auth.NewHandler(authRepo, sm, rec),
+		Auth:        auth.NewHandlerWithLimiter(authRepo, sm, rec, lim),
 		Stores:      store.NewHandler(shopRepo, rec),
 		Credentials: store.NewCredentialHandler(credSvc, rec),
 		System:      store.NewSystemHandler(shopRepo, q.Inspector()),
@@ -263,6 +269,62 @@ func TestWriteOpsAreAudited(t *testing.T) {
 	env.db.Model(&audit.AuditLog{}).Where("action = ?", "credential.create").Count(&n)
 	if n != 1 {
 		t.Fatalf("应有 1 条 credential.create 审计，实际 %d", n)
+	}
+}
+
+// 回归：畸形 / 缺字段的登录请求也要留审计（曾被跳过 = 爆破者的无痕路径）；
+// 超长用户名也要能落库（曾被 MySQL 1406 整条抹掉）。
+func TestLoginFailureAuditedEvenWhenMalformed(t *testing.T) {
+	env := newTestEnv(t)
+
+	longName := strings.Repeat("x", 200)
+	body := bytes.NewReader([]byte(`{"name":"` + longName + `"}`)) // 缺 password
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := env.do(t, req, nil)
+	if !strings.Contains(rec.Body.String(), `"code":1001`) {
+		t.Fatalf("缺字段应 1001，实际 %s", rec.Body.String())
+	}
+
+	var rows []audit.AuditLog
+	if err := env.db.Where("action = ?", "auth.login.fail").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("畸形登录请求应留 1 条审计，实际 %d", len(rows))
+	}
+	if n := utf8.RuneCountInString(rows[0].Actor); n > 128 {
+		t.Fatalf("actor 应被截到列宽（128 字符）内，实际 %d 字符", n)
+	}
+}
+
+// 回归：登录失败限速——同 IP+用户名 失败超限后先拒（429），成功前不再校验密码。
+func TestLoginThrottleBlocksAfterFailures(t *testing.T) {
+	env := newTestEnvWithLimiter(t, auth.NewLoginLimiter(3, time.Minute))
+	env.createUser(t, "target", middleware.RoleAdmin)
+
+	attempt := func(pw string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"name": "target", "password": pw})
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		return env.do(t, req, nil)
+	}
+
+	for i := 0; i < 3; i++ {
+		rec := attempt("wrong-password")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"code":2001`) {
+			t.Fatalf("第 %d 次错误密码应 200/2001，实际 %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	// 第 4 次：限速先于密码校验 → 429（哪怕密码是对的）。
+	rec := attempt("password-123")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("超限后应 429，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	var n int64
+	env.db.Model(&audit.AuditLog{}).Where("action = ?", "auth.login.blocked").Count(&n)
+	if n == 0 {
+		t.Fatal("被限速的尝试也要留审计")
 	}
 }
 
