@@ -18,9 +18,9 @@ User=hub
 Group=hub
 WorkingDirectory=/opt/fulfillment-hub
 ExecStart=/opt/fulfillment-hub/api
-# 主密钥：内容为 32 字节随机值，用 systemd-creds 加密生成（见 install.md §6）；
-# 名必须与 systemd-creds encrypt --name= 一致，否则加载失败。
-LoadCredentialEncrypted=hub-vault-master-key
+# 主密钥：Tink keyset JSON（backend/cmd/genvaultkey 生成，见 install.md §6），systemd-creds 加密后注入；
+# 文件名必须与后端配置 vault.master_key_file（默认 vault_keyset.json）一致，否则加载失败。
+LoadCredentialEncrypted=vault_keyset.json:/etc/credstore.encrypted/vault_keyset.json
 Restart=on-failure
 RestartSec=3
 

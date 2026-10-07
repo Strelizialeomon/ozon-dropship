@@ -73,3 +73,11 @@ PR #12 重审（owner 2026-10-07 点选「改」）的处置，原文见 PR #12 
 | 12-13 | 轻微 | raw.csv 标签含逗号会错列、统计全错 | 改：标签写入前替换逗号 |
 | 12-14 | 轻微 | §8 取证 `tr < /proc/$pid/environ` 重定向发生在 sudo 之前，非 root 读不到 | 改：包进 `sudo sh -c` |
 | 12-15 | 轻微 | 未装 rsync/rclone，备份外送可能 `command not found` | 改：安装节补 `apt install -y rsync`（rclone 方案同理） |
+
+合并前对表（2026-10-07，A、E 已合并后；owner 点选「修完再摆闸」）的处置，发现与逐条核对见 PR #12 评论：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 12-16 | 严重 | 主密钥契约不一致：本目录定「`hub-vault-master-key` + 32 字节随机值」，A 实装读 Tink keyset JSON、文件名 `vault_keyset.json`（`backend/cmd/genvaultkey` 生成）——照现状装机服务起不来 | 改：install.md §6 改走 `genvaultkey` 生成 keyset JSON；unit 改 `LoadCredentialEncrypted=vault_keyset.json:…`；restore-drill §4、README 契约表同步 |
+| 12-17 | 中 | `vault.credentials_dir` 的 example 占位指向旧单元名 `ozon-dropship.service`，与本 unit 名不符，装机照抄则保险箱初始化失败 | 改：install.md §7 明写「必改一处：`/run/credentials/fulfillment-hub.service`」 |
+| 12-18 | 轻微 | Caddyfile 反代 `/hooks/*`，但 S1 无该路由（推送入口属 S2），注释宣称的来源校验尚不存在 | 改：Caddyfile 注释该块并注明 S2 落地后启用；README 文件地图同步 |

@@ -5,15 +5,16 @@
 # 对接（与 S1-A / S1-E 的约定，见 deploy/README.md）：
 #   - Go 监听 127.0.0.1:8080（只回环；TLS 由 Caddy 终结）
 #   - 前端静态资源 = S1-E 的 frontend/dist，同步到 /srv/fulfillment-hub/web
-# Ozon / 1688 推送的来源校验在 Go 层做（总纲 §5.9），Caddy 不做 IP 过滤。
+# 说明：推送入口（/hooks/*，总纲 §5.9）属 S2 份——S1 是纯轮询、Go 侧没有该路由，
+#       故下方先注释；S2 落地后取消注释（来源校验届时在 Go 层做，Caddy 不做 IP 过滤）。
 
 hub.example.com {
 	encode
 
-	# 推送入口（Ozon / 1688 回调）→ Go
-	handle /hooks/* {
-		reverse_proxy 127.0.0.1:8080
-	}
+	# 推送入口（Ozon / 1688 回调）→ Go（S2 份落地后启用）
+	#handle /hooks/* {
+	#	reverse_proxy 127.0.0.1:8080
+	#}
 
 	# 操作台接口 → Go
 	handle /api/* {

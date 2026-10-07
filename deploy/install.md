@@ -88,22 +88,35 @@ redis-cli CONFIG GET appendonly appendfsync   # 期望：yes / everysec
 
 ## 6. 主密钥与加密凭据
 
-主密钥加密数据库里的店铺凭据（总纲 §5.4）。**生成后必须离机留一份**——加密凭据绑定本机，
-机器换/重装后，旧机器上的文件解不开，只有你手里的那份能重建（见 `backup/restore-drill.md` §4）。
+主密钥加密数据库里的店铺凭据（总纲 §5.4）。S1-A 实装（`backend/internal/infra/vault`）要的是一份
+**Tink keyset JSON**，用仓库自带的 `backend/cmd/genvaultkey` 生成。**生成后必须离机留一份**——
+加密凭据绑定本机，机器换/重装后，旧机器上的文件解不开，只有你手里的那份能重建
+（见 `backup/restore-drill.md` §4）。
+
+在**构建机**上生成（仓库 `backend/`）：
+
+```bash
+go run ./cmd/genvaultkey -out /tmp/vault_keyset.json
+# ↑ 生成 Tink AES256-GCM keyset JSON（0600）。把整份 JSON 文本抄进密码管理器 = 离机备份。
+```
+
+传到服务器、加密入库（这份 JSON 就是主密钥明文：别走 git / 聊天工具 / 邮件）：
 
 ```bash
 sudo install -d -m 0700 /etc/credstore.encrypted
-sudo sh -c 'umask 077; head -c 32 /dev/urandom > /root/hub-master-key.plain'
-sudo base64 -w0 /root/hub-master-key.plain; echo
-# ↑ 把这串 base64 抄进密码管理器 —— 这就是主密钥的离机备份
-sudo systemd-creds encrypt --name=hub-vault-master-key \
-  /root/hub-master-key.plain /etc/credstore.encrypted/hub-vault-master-key
-sudo chmod 600 /etc/credstore.encrypted/hub-vault-master-key
-sudo shred -u /root/hub-master-key.plain
+scp /tmp/vault_keyset.json <server>:/root/vault_keyset.json
+ssh <server>
+sudo systemd-creds encrypt --name=vault_keyset.json \
+  /root/vault_keyset.json /etc/credstore.encrypted/vault_keyset.json
+sudo chmod 600 /etc/credstore.encrypted/vault_keyset.json
+sudo shred -u /root/vault_keyset.json
 ```
 
-> 凭据内容 = 32 字节随机值；systemd 单元按名字 `hub-vault-master-key` 加载（见 §8）。
-> 名字必须与 `systemd-creds encrypt --name=` 一致，否则加载失败。
+构建机上的明文也清掉：`shred -u /tmp/vault_keyset.json 2>/dev/null || rm -f /tmp/vault_keyset.json`
+
+> 文件名 `vault_keyset.json` 三处必须一致，否则服务起不来（`vault.New` 失败即 `logger.Fatalf`）：
+> `systemd-creds encrypt --name=`、单元的 `LoadCredentialEncrypted=`、后端配置
+> `vault.master_key_file`（默认即此名）。
 
 ## 7. 后端首次部署（二进制 + 配置 + 迁移）
 
@@ -120,7 +133,9 @@ scp /tmp/goose <server>:/usr/local/bin/goose
 ```
 
 配置（字段以 S1-A 的 `backend/config/config.example.yaml` 为准；要点：监听 `127.0.0.1:8080`、
-MySQL 用 `hub`@localhost、Redis 本机）：
+MySQL 用 `hub`@localhost、Redis 本机）。**必改一处**：`vault.credentials_dir` 改成
+`/run/credentials/fulfillment-hub.service`（凭据目录名 = systemd 单元名；example 里的
+`ozon-dropship.service` 是旧占位，不改则服务起不来）：
 
 ```bash
 scp backend/config/config.example.yaml <server>:/tmp/config.yaml
@@ -156,7 +171,7 @@ pid=$(systemctl show -p MainPID --value fulfillment-hub)
 sudo sh -c "tr '\0' '\n' < /proc/$pid/environ" | grep -iE 'key|secret|master' || echo '环境变量里没有密钥 ✓'
 sudo ps -o args= -p $pid                       # 进程参数里也没有 ✓
 sudo ls /proc/$pid/root/run/credentials/fulfillment-hub.service/
-# ↑ 能看到 hub-vault-master-key = 进程读到了凭据
+# ↑ 能看到 vault_keyset.json = 进程读到了凭据
 ```
 
 重启自动起（验收第 2 条）：`sudo reboot` 后回来 `systemctl is-active fulfillment-hub` 应为 `active`

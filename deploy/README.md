@@ -8,7 +8,7 @@
 
 | 本目录 | 落点 | 干什么 |
 |---|---|---|
-| `Caddyfile` | `/etc/caddy/Caddyfile` | HTTPS、静态资源 + SPA 回退、`/api` `/hooks` 反代 |
+| `Caddyfile` | `/etc/caddy/Caddyfile` | HTTPS、静态资源 + SPA 回退、`/api` 反代（`/hooks` 属 S2 推送份，先注释） |
 | `systemd/fulfillment-hub.service` | `/etc/systemd/system/` | 托管 Go（主密钥经加密凭据注入） |
 | `systemd/fulfillment-hub-backup.{service,timer}` | `/etc/systemd/system/` | 每日备份定时器 |
 | `mysql/fulfillment-hub.cnf` | `/etc/mysql/mysql.conf.d/` | binlog 保留 30 天 |
@@ -35,12 +35,12 @@
 | Go 监听 | `127.0.0.1:8080`（只回环，TLS 归 Caddy） | 后端 config；Caddyfile 反代到这个地址 |
 | 配置文件 | `/opt/fulfillment-hub/config/config.yaml`（工作目录 = `/opt/fulfillment-hub`） | systemd unit 的 `WorkingDirectory` |
 | 二进制 | `/opt/fulfillment-hub/api`（由 `./cmd/api` 构建） | unit 的 `ExecStart`；release.md 的构建命令 |
-| 主密钥凭据 | 名字 `hub-vault-master-key`，内容 32 字节随机值 | install.md §6 生成；unit `LoadCredentialEncrypted`；S1-A 保险箱读 `$CREDENTIALS_DIRECTORY` |
+| 主密钥凭据 | 文件 `vault_keyset.json`（Tink keyset JSON，`backend/cmd/genvaultkey` 生成） | install.md §6 生成；unit `LoadCredentialEncrypted`；后端读配置 `vault.credentials_dir`（须 = 单元凭据目录）+ `vault.master_key_file` |
 | 静态资源目录 | `/srv/fulfillment-hub/web`（= `frontend/dist` 的内容） | Caddyfile 的 `root` |
 
 > unit 还带基础进程加固（NoNewPrivileges / PrivateTmp / ProtectSystem=strict / ProtectHome）：
-> `ProtectSystem=strict` 下应用只能写 `/opt/fulfillment-hub`——S1-A 实装若有别的落盘路径，对表时改 `ReadWritePaths`。
-> F 的合并序在 A、E 之后——那时代码已成真，以上五条逐一对表；有出入以 A / E 实装为准，改本目录。
+> `ProtectSystem=strict` 下应用只能写 `/opt/fulfillment-hub`——已对表：A 实装无额外落盘路径（日志走 stdout），`ReadWritePaths` 无需放宽。
+> 五条对接点已于 2026-10-07 与 A、E 实装逐一对表；修正记录见 `docs/specs/spec-s1f-deploy.md` §7。
 
 ## 验收对照（issue #11）
 
