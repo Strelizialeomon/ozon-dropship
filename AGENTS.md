@@ -2,7 +2,7 @@
 
 ## 仓库结构
 
-一个总仓、两个子项目：`backend/`（Go：gin + GORM + MySQL + Redis/asynq）与 `frontend/`（React，S1-E 未开工），
+一个总仓、两个子项目：`backend/`（Go：gin + GORM + MySQL + Redis/asynq）与 `frontend/`（React，S1-E 已合并、待上线），
 依赖各自分开——见 [ADR-20261007-repo-layout](docs/decisions/2026-10-07-repo-layout.md)；
 后端包划分与依赖方向见 [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md)。
 

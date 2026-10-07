@@ -1,7 +1,7 @@
 # spec-handover-docs —— 交接文档包（独立 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」）。本文是**独立需求**，不属 S1 六份子 spec；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开（本 spec 合并后开实施 issue，届时回填号）｜ 状态：v1.1（2026-10-07：PR #22 轻审处置——修订 8 条发现，见 §8）｜ 发布序：随时可开（S1-A ~ S1-F 已全部合并，无前置）
+> Issue: [#23](https://github.com/Strelizialeomon/ozon-dropship/issues/23)（本份的实施单）｜ 状态：v1.1（2026-10-07：PR #22 轻审处置——修订 8 条发现，见 §8）｜ 发布序：随时可开（S1-A ~ S1-F 已全部合并，无前置）
 > 跨份验收与协作声明：无（独立需求，不挂 S1 父单）。
 > 长期决定见 [ADR-20261007-handover-s2-first](../decisions/2026-10-07-handover-s2-first.md)（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
 
