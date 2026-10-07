@@ -15,11 +15,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/auth"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/catalog"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/audit"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/notify"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/queue"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/snowflake"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/middleware"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/order"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/purchase"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/shipment"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/store"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/testutil"
 
@@ -68,16 +72,31 @@ func newTestEnvWithLimiter(t *testing.T, lim *auth.LoginLimiter) *testEnv {
 	})
 	authRepo := auth.NewRepo(db)
 
+	// S1-D 域的装配（与 cmd/api 同构；Ozon / 1688 客户端工厂传 nil = 未接入）
+	catalogRepo := catalog.NewRepo(db)
+	relayRepo := order.NewRelayRepo(db)
+	exceptions := order.NewExceptions(db)
+	orderRepo := order.NewRepo(db)
+	orderSvc := order.NewService(orderRepo, exceptions, shopRepo, credSvc, nil, q)
+	purchaseRepo := purchase.NewRepo(db)
+	purchaseSvc := purchase.NewService(purchaseRepo, orderSvc, relayRepo, catalogRepo, credSvc, nil, rec, q)
+	shipmentSvc := shipment.NewService(shipment.NewRepo(db), orderSvc, purchaseRepo, credSvc, nil, rec)
+
 	engine, err := Setup(Deps{
-		Mode:        "debug",
-		Session:     sm,
-		ResolveUser: authRepo.Resolve,
-		Audit:       rec,
-		Auth:        auth.NewHandlerWithLimiter(authRepo, sm, rec, lim),
-		Stores:      store.NewHandler(shopRepo, rec),
-		Credentials: store.NewCredentialHandler(credSvc, rec),
-		System:      store.NewSystemHandler(shopRepo, q.Inspector()),
-		Queue:       q,
+		Mode:          "debug",
+		Session:       sm,
+		ResolveUser:   authRepo.Resolve,
+		Audit:         rec,
+		Auth:          auth.NewHandlerWithLimiter(authRepo, sm, rec, lim),
+		Stores:        store.NewHandler(shopRepo, rec),
+		Credentials:   store.NewCredentialHandler(credSvc, rec),
+		System:        store.NewSystemHandler(shopRepo, q.Inspector()),
+		Orders:        order.NewHandler(orderRepo, orderSvc, rec),
+		Exceptions:    order.NewExceptionHandler(exceptions, rec),
+		PurchaseTasks: purchase.NewHandler(purchaseRepo, purchaseSvc, rec),
+		Catalog:       catalog.NewHandler(catalogRepo, rec),
+		Shipments:     shipment.NewHandler(shipmentSvc, relayRepo, rec),
+		Queue:         q,
 	})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)

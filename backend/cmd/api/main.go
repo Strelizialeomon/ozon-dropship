@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/auth"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/catalog"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/audit"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/config"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/db"
@@ -25,7 +26,10 @@ import (
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/snowflake"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/infra/vault"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/middleware"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/order"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/purchase"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/router"
+	"github.com/Strelizialeomon/ozon-dropship/backend/internal/shipment"
 	"github.com/Strelizialeomon/ozon-dropship/backend/internal/store"
 
 	"github.com/redis/go-redis/v9"
@@ -125,6 +129,56 @@ func main() {
 		logger.Fatalf("[main] %v", err)
 	}
 
+	// S1-D 履约编排：catalog（货源映射）→ order（订单 + 异常池）→ purchase / shipment。
+	catalogRepo := catalog.NewRepo(db.DB)
+	catalogHandler := catalog.NewHandler(catalogRepo, auditRec)
+
+	exceptions := order.NewExceptions(db.DB)
+	orderRepo := order.NewRepo(db.DB)
+	relayRepo := order.NewRelayRepo(db.DB)
+	// TODO(S1-B 合并后)：把 ozon 客户端适配成 order.PostingSourceFactory 接进第 5 参，
+	//   拉单任务当前会明确报「Ozon 客户端未接入」；人工流程与其余接口不受影响。
+	orderSvc := order.NewService(orderRepo, exceptions, shopRepo, credSvc, nil, q)
+	orderHandler := order.NewHandler(orderRepo, orderSvc, auditRec)
+	exceptionHandler := order.NewExceptionHandler(exceptions, auditRec)
+
+	// TODO(S1-C 合并后)：把 alibaba 客户端适配成 purchase.BuyerClientFactory 接进第 6 参，
+	//   自动执行器当前会报「1688 客户端未接入」（可转人工）。
+	purchaseRepo := purchase.NewRepo(db.DB)
+	purchaseSvc := purchase.NewService(purchaseRepo, orderSvc, relayRepo, catalogRepo, credSvc, nil, auditRec, q)
+	purchaseHandler := purchase.NewHandler(purchaseRepo, purchaseSvc, auditRec)
+
+	// TODO(S1-B 合并后)：把 ozon 客户端适配成 shipment.FulfillerFactory 接进第 5 参。
+	shipmentRepo := shipment.NewRepo(db.DB)
+	shipmentSvc := shipment.NewService(shipmentRepo, orderSvc, purchaseRepo, credSvc, nil, auditRec)
+	shipmentHandler := shipment.NewHandler(shipmentSvc, relayRepo, auditRec)
+
+	// S1-D 任务处理器与补投规则（总纲 §5.5）。
+	q.Handle(order.TaskTypePollStores, orderSvc.HandlePollStores)
+	q.Handle(order.TaskTypePoll, orderSvc.HandlePoll)
+	q.Handle(order.TaskTypeSweep, orderSvc.HandleSweep)
+	q.Handle(order.TaskTypePurchasePlan, purchaseSvc.HandlePlan)
+	q.Handle(purchase.TaskTypeExecute, purchaseSvc.HandleExecute)
+	q.Handle(purchase.TaskTypeClose, purchaseSvc.HandleClose)
+	q.Handle(purchase.TaskTypeSweep, purchaseSvc.HandleSweep)
+	q.RegisterRescan(orderSvc.RescanRule())
+	for _, rule := range purchaseSvc.RescanRules() {
+		q.RegisterRescan(rule)
+	}
+	// 定时任务（北京时间）：拉单扫描 5 分钟、超时异常扫描 10 分钟、国内段停滞扫描 30 分钟。
+	for _, cron := range []struct {
+		spec string
+		typ  string
+	}{
+		{"*/5 * * * *", order.TaskTypePollStores},
+		{"*/10 * * * *", order.TaskTypeSweep},
+		{"*/30 * * * *", purchase.TaskTypeSweep},
+	} {
+		if err := q.RegisterCron(cron.spec, queue.Task{Type: cron.typ}); err != nil {
+			logger.Fatalf("[main] %v", err)
+		}
+	}
+
 	authRepo := auth.NewRepo(db.DB)
 	sm := middleware.NewSessionManager(rdb, middleware.SessionConfig{
 		CookieName: cfg.Session.CookieName,
@@ -143,7 +197,14 @@ func main() {
 		Stores:      shopHandler,
 		Credentials: credHandler,
 		System:      systemHandler,
-		Queue:       q,
+
+		Orders:        orderHandler,
+		Exceptions:    exceptionHandler,
+		PurchaseTasks: purchaseHandler,
+		Catalog:       catalogHandler,
+		Shipments:     shipmentHandler,
+
+		Queue: q,
 	})
 	if err != nil {
 		logger.Fatalf("[main] 路由装配失败: %v", err)

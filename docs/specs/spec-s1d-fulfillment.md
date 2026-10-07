@@ -1,7 +1,7 @@
 # spec-s1d-fulfillment —— S1-D 履约编排（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-D**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
+> Issue: [#9](https://github.com/Strelizialeomon/ozon-dropship/issues/9) ｜ 状态：v1.0（2026-10-07；实施中，见实施 PR）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
 > 跨份验收与协作声明：S1 父 issue（待开）
 
 ## 1. 管什么 / 不管什么
