@@ -10,6 +10,10 @@
 - Ubuntu 24.04 LTS（推荐）或 Debian 12+：**systemd ≥ 250**（加密凭据要用；`systemctl --version` 查）。
 - 固定公网 IP + 一个域名，A 记录已指向本机。
 - 防火墙 / 云安全组放行 **80、443**（Caddy 证书）与 22。
+- **操作方式**：本手册按「以 root 经 ssh 操作服务器」写——`<server>` 指可 root 登录的地址（例
+  `root@1.2.3.4`，或 `~/.ssh/config` 里 root 身份的别名）；先在开发机 `ssh-copy-id root@<ip>`
+  （云镜像默认只许密钥登录 root，正好）。若你坚持普通用户 + sudo：把每条 `scp` 改成先落 `/tmp`、
+  再用 `sudo install/mv` 落位，语义不变。
 - 装完大约 1 小时。
 
 ## 1. 用户与目录
@@ -31,6 +35,9 @@ sudo apt update && sudo apt install -y mysql-server
 
 # Redis（发行版自带的 7.x 即可用）
 sudo apt install -y redis-server
+
+# 备份外送要用（rsync 方案；对象存储方案就把这行换成 rclone）
+sudo apt install -y rsync
 
 # Caddy（官方 apt 源，照官网）
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
@@ -107,14 +114,18 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/hub-api ./cmd/a
 # 服务器是 ARM 架构就改 GOARCH=arm64
 scp /tmp/hub-api <server>:/opt/fulfillment-hub/api
 scp -r backend/migrations <server>:/opt/fulfillment-hub/
+# goose CLI（迁移用；交叉编译后传上去。也可从 goose 官方 releases 下 linux 二进制，版本自定）
+GOOS=linux GOARCH=amd64 GOBIN=/tmp go install github.com/pressly/goose/v3/cmd/goose@latest
+scp /tmp/goose <server>:/usr/local/bin/goose
 ```
 
 配置（字段以 S1-A 的 `backend/config/config.example.yaml` 为准；要点：监听 `127.0.0.1:8080`、
 MySQL 用 `hub`@localhost、Redis 本机）：
 
 ```bash
-scp backend/config/config.example.yaml <server>:/opt/fulfillment-hub/config/config.yaml
-ssh <server>  # 编辑 /opt/fulfillment-hub/config/config.yaml，填生产值
+scp backend/config/config.example.yaml <server>:/tmp/config.yaml
+ssh <server>  # 编辑 /tmp/config.yaml 填生产值，然后落位并收紧权限（里面有 DB 密码）：
+#   install -o root -g hub -m 640 /tmp/config.yaml /opt/fulfillment-hub/config/config.yaml
 ```
 
 迁移（goose CLI，装到服务器 `/usr/local/bin/goose`；DSN 参数与配置保持一致）：
@@ -126,8 +137,8 @@ GOOSE_DRIVER=mysql
 GOOSE_DBSTRING=hub:替换-应用密码@tcp(127.0.0.1:3306)/fulfillment_hub?parseTime=true&multiStatements=true
 EOF
 chmod 600 /etc/fulfillment-hub/migrate.env'
-set -a; . /etc/fulfillment-hub/migrate.env; set +a
-goose -dir /opt/fulfillment-hub/migrations up
+sudo sh -c 'set -a; . /etc/fulfillment-hub/migrate.env; set +a; \
+  goose -dir /opt/fulfillment-hub/migrations up'
 ```
 
 ## 8. systemd：装单元、开机自启、核验
@@ -142,7 +153,7 @@ ssh <server> 'systemctl status fulfillment-hub --no-pager'
 
 ```bash
 pid=$(systemctl show -p MainPID --value fulfillment-hub)
-sudo tr '\0' '\n' < /proc/$pid/environ | grep -iE 'key|secret|master' || echo '环境变量里没有密钥 ✓'
+sudo sh -c "tr '\0' '\n' < /proc/$pid/environ" | grep -iE 'key|secret|master' || echo '环境变量里没有密钥 ✓'
 sudo ps -o args= -p $pid                       # 进程参数里也没有 ✓
 sudo ls /proc/$pid/root/run/credentials/fulfillment-hub.service/
 # ↑ 能看到 hub-vault-master-key = 进程读到了凭据

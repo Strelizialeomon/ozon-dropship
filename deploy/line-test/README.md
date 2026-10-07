@@ -13,9 +13,11 @@ scp -r deploy/line-test/  root@<地区机器>:/root/line-test/
 ssh root@<地区机器>
 cd /root/line-test
 nohup ./line_test.sh -d 24h -i 60 > run.log 2>&1 &
-# 24 小时后（或随时想收）：
-tail -n 5 run.log          # 看是不是还在跑
-cat results-*/summary.md   # 这就是要贴的表
+# 24 小时后（或想提前收）：
+tail -n 3 run.log              # 看是不是还在跑
+kill <脚本进程号>               # 停止用 TERM（kill 默认信号）：会收尾并写出 summary.md；
+                               # 后台作业里 SIGINT 会被系统忽略，Ctrl-C 语义在这里没用
+cat results-*/summary.md       # 这就是要贴的表
 ```
 
 机器只要 curl + awk + sort（发行版自带）；不需要任何凭据。

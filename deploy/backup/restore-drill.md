@@ -13,13 +13,26 @@
 
 先确认要恢复到的**目标时刻 T**（比如「昨天 12:00」），再挑 T 之前最近的一次全量。
 
+**防呆（最重要的一步）**：下面所有 `mysql` / `mysqlbinlog … | mysql` 都要打到**演练实例**，不是生产实例。
+先定一个指向演练实例的变量（演练机本机就是裸 `mysql`；同机的另一个实例或另一台机器，
+加 `--socket=<演练实例 socket>` 或 `--host/--port`）：
+
+```bash
+DRILL_MYSQL="mysql"                                              # 演练机本机
+# DRILL_MYSQL="mysql --socket=/run/mysqld/mysqld-drill.sock"     # 同机演练实例
+$DRILL_MYSQL -e "SELECT @@port, @@socket, @@datadir;"            # ← 动手前先看这眼：指对了吗？
+```
+
+（dump 是 `--databases` 导出：自带 `CREATE DATABASE` + 每张表 `DROP TABLE IF EXISTS`。
+打错实例 = 逐表覆盖、没有后悔药，所以这条防呆别省。）
+
 ## 1. 全量落库
 
 ```bash
-# 演练机上（或生产机的演练库实例），确认 dump 没坏：
+# 确认 dump 没坏（在同时放着 db-*.sql.gz 与 .sha256 的目录里）：
 sha256sum -c db-20261007-0330.sql.gz.sha256
-# 校验通过后恢复（dump 用 --databases 导出，自带 CREATE DATABASE）：
-zcat db-20261007-0330.sql.gz | mysql
+# 校验通过后恢复：
+zcat db-20261007-0330.sql.gz | $DRILL_MYSQL
 ```
 
 ## 2. 从 dump 头部取 binlog 坐标
@@ -33,18 +46,21 @@ zcat db-20261007-0330.sql.gz | head -80 | grep -m1 'CHANGE REPLICATION SOURCE'
 ## 3. 回放 binlog 到 T
 
 把 `binlog.000123` 起、到 T 所在的那个文件为止，按顺序列给 mysqlbinlog
-（`--start-position` 只作用于第一个文件；`--stop-datetime` 按**运行 mysqlbinlog 那台机器的本地时区**解释）：
+（`--start-position` 只作用于第一个文件；`--stop-datetime` 按**运行 mysqlbinlog 那台机器的本地时区**解释）。
+
+**用 root 跑回放**：行格式（8.x 默认）下回放执行的是 `BINLOG` 语句，要 `BINLOG_ADMIN`（或弃用的 SUPER）——
+`hub_backup` 没这个权限，用它会在第一条行事件就 Access denied、回放半途而废。演练机上就是 `sudo`：
 
 ```bash
 mysqlbinlog --start-position=456 \
   --stop-datetime='2026-10-07 12:00:00' \
-  ./binlog/binlog.000123 ./binlog/binlog.000124 ./binlog/binlog.000125 | mysql
+  ./binlog/binlog.000123 ./binlog/binlog.000124 ./binlog/binlog.000125 | sudo $DRILL_MYSQL
 ```
 
 演练验收：查一眼数据确实停在 T，而不是「脚本没报错就算过」——
 
 ```bash
-mysql -e "SELECT MAX(created_at) FROM fulfillment_hub.orders; SELECT MAX(at) FROM fulfillment_hub.audit_logs;"
+$DRILL_MYSQL -e "SELECT MAX(created_at) FROM fulfillment_hub.orders; SELECT MAX(at) FROM fulfillment_hub.audit_logs;"
 # 结果应 ≤ T；再抽查一两条 T 前后已知变化的数据，对得上才算过。
 ```
 
@@ -64,5 +80,9 @@ systemd 加密凭据**绑定生成它的那台机器**（TPM / 主机密钥）�
 ## 5. 边界（如实标）
 
 - **可恢复窗口 = 最近 30 天**（全量与 binlog 都保留 30 天，ADR 口径）。更早只能恢复到某次全量的时点，中间的空洞补不回来。
+- **可恢复到的最新一端 = 最近一次成功备份跑完的时刻**（最坏丢约 24 小时，取决于 timer 频率）。
+  备份脚本每轮会把 dump 的坐标文件补一次 `FLUSH LOGS` 关闭后外送，所以最新那份 dump 本身可以完整回放到它自己的时点；
+  但它跑完之后的写入要等下一轮才外送。想收紧窗口：把 `fulfillment-hub-backup.timer` 的 `OnCalendar` 调密
+  （比如每 6 小时），或改 `mysqlbinlog --stop-never` 连续外送。
 - 回放期间如果有人在用旧库，坐标会漂——演练和真恢复都应在「不再写入」的库上做（生产真恢复时先停服务）。
 - 本文件只覆盖 MySQL。Redis 里是任务队列与会话（总纲 §6），丢了由补投扫描和重新登录兜底，不进本演练。

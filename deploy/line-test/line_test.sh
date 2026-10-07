@@ -15,6 +15,7 @@
 # 判定口径：curl 失败（超时 / 连不上 / TLS 错）或 HTTP ≥ 500 = 失败；
 #   其余（含未鉴权的 401 / 400）= 可达——服务端答话即证明线路通。
 # 只探测、不写数据（Ozon 用 /v1/roles 读密钥信息；1688 用 currentTime 读系统时间）。
+# 停止：kill <pid>（TERM）会收尾并写出 summary.md；后台运行时 SIGINT 会被系统忽略，别用。
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -25,7 +26,7 @@ INTERVAL=60
 OUT=""
 TARGETS_FILE=""
 
-usage() { sed -n '2,17p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,18p' "$0"; exit "${1:-0}"; }
 
 while getopts "d:i:o:h" opt; do
   case "$opt" in
@@ -62,7 +63,7 @@ LABELS=(); URLS=(); METHODS=()
 while read -r label url method _rest; do
   [ -z "$label" ] && continue
   case "$label" in \#*) continue ;; esac
-  LABELS[${#LABELS[@]}]=$label
+  LABELS[${#LABELS[@]}]=${label//,/;}   # 标签里的逗号会打乱 raw.csv 的列，写前统一替换
   URLS[${#URLS[@]}]=$url
   METHODS[${#METHODS[@]}]=${method:-GET}
 done < "$TARGETS_FILE"
@@ -111,7 +112,7 @@ summarize() {
 # ── 主循环 ────────────────────────────────────────────────
 START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 STOP=0
-trap 'STOP=1' INT TERM
+trap 'STOP=1' INT TERM   # 后台（nohup）运行时 INT 会被系统忽略且不可恢复——停请用 TERM（kill 默认信号）
 trap 'summarize' EXIT
 
 echo "开始探测：${#LABELS[@]} 个目标 × 每 ${INTERVAL}s 一轮 × 共 ${DURATION_S}s；输出到 $OUT"

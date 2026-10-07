@@ -38,6 +38,8 @@
 | 主密钥凭据 | 名字 `hub-vault-master-key`，内容 32 字节随机值 | install.md §6 生成；unit `LoadCredentialEncrypted`；S1-A 保险箱读 `$CREDENTIALS_DIRECTORY` |
 | 静态资源目录 | `/srv/fulfillment-hub/web`（= `frontend/dist` 的内容） | Caddyfile 的 `root` |
 
+> unit 还带基础进程加固（NoNewPrivileges / PrivateTmp / ProtectSystem=strict / ProtectHome）：
+> `ProtectSystem=strict` 下应用只能写 `/opt/fulfillment-hub`——S1-A 实装若有别的落盘路径，对表时改 `ReadWritePaths`。
 > F 的合并序在 A、E 之后——那时代码已成真，以上五条逐一对表；有出入以 A / E 实装为准，改本目录。
 
 ## 验收对照（issue #11）

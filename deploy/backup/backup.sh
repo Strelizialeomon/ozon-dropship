@@ -24,6 +24,10 @@ die() { echo "$LOG_PREFIX 出错：$*" >&2; exit 1; }
 LOCAL_DIR=${LOCAL_DIR:-/var/backups/fulfillment-hub}
 RETENTION_DAYS=${RETENTION_DAYS:-30}
 
+# ssh/rsync 的超时与保活：防「连接被黑洞后进程挂死、flock 锁不释放、备份从此静默停摆」。
+# BatchMode=yes：非交互，连不上就失败退出，不许弹密码。unit 另有 TimeoutStartSec 兜底。
+SSH_OPTS="-o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o BatchMode=yes"
+
 if [ -n "${RSYNC_REMOTE:-}" ] && [ -n "${RCLONE_REMOTE:-}" ]; then
   die "RSYNC_REMOTE 与 RCLONE_REMOTE 只能设一个（二选一，另一个留空）"
 fi
@@ -54,29 +58,36 @@ gzip -t "$DUMP_GZ" || die "dump 不是完整的 gzip，别外送"
 ( cd "$LOCAL_DIR/db" && sha256sum "$(basename "$DUMP_GZ")" ) > "$DUMP_GZ.sha256"
 log "dump 完成：$(du -h "$DUMP_GZ" | cut -f1)"
 
-# ── 2. 当前正在写的 binlog 文件：外送时排除（写一半的文件不算备份）──
+# ── 1.5 关闭 dump 的坐标文件，保证「最新 dump 的起点」也在本轮外送 ──
+# mysqldump 的 --flush-logs 让坐标落在它刚新建的那个文件上。若不补这一次 FLUSH LOGS，
+# 该文件就是下面要排除的「当前文件」，会被永久落下——最新一天的 dump 到了备份机也回放不了。
+mysql --defaults-extra-file="$MYSQL_CNF" -e "FLUSH LOGS"
+
+# ── 2. 找当前的 binlog 文件：外送时排除（写一半的文件不算备份）──────
+# 到这里，dump 的坐标文件已在 1.5 被关闭、随本轮外送；被排除的是刚生成的这一个。
 CURRENT_BINLOG=$(mysql --defaults-extra-file="$MYSQL_CNF" --batch --skip-column-names \
   -e "SHOW BINARY LOG STATUS" | awk 'NR==1{print $1}')
 [ -n "$CURRENT_BINLOG" ] || die "拿不到当前 binlog 文件名（账号缺 REPLICATION CLIENT 权限？）"
-log "当前 binlog：${CURRENT_BINLOG}（本次不外送该文件）"
+log "当前 binlog：${CURRENT_BINLOG}（本轮不外送；已关闭的文件都随本轮外送）"
 
 # ── 3. 外送 ────────────────────────────────────────────────────
 if [ -n "${RSYNC_REMOTE:-}" ]; then
   RHOST=${RSYNC_REMOTE%%:*}
   RPATH=${RSYNC_REMOTE#*:}
-  ssh "$RHOST" "mkdir -p '$RPATH/db' '$RPATH/binlog'"
+  ssh $SSH_OPTS "$RHOST" "mkdir -p '$RPATH/db' '$RPATH/binlog'"
   log "rsync → $RSYNC_REMOTE"
-  rsync -a "$DUMP_GZ" "$DUMP_GZ.sha256" "$RSYNC_REMOTE/db/"
+  rsync -a --timeout=600 -e "ssh $SSH_OPTS" "$DUMP_GZ" "$DUMP_GZ.sha256" "$RSYNC_REMOTE/db/"
   # 只拷 binlog 文件（datadir 与 binlog 同目录时，别把整个数据目录拖走）；
   # rsync 规则按命令行顺序先匹配先算：先排除正在写的那个（写一半的不算备份），再放行 binlog.*，其余全挡
-  rsync -a --exclude "$CURRENT_BINLOG" --include='binlog.[0-9]*' --exclude='*' \
+  rsync -a --timeout=600 -e "ssh $SSH_OPTS" \
+    --exclude "$CURRENT_BINLOG" --include='binlog.[0-9]*' --exclude='*' \
     "$BINLOG_DIR/" "$RSYNC_REMOTE/binlog/"
 
   # ── 4. 两端按保留期清理（远端不加 rsync --delete：本地坏了不能反过来清远端）──
   log "清理本地 > $RETENTION_DAYS 天的 dump"
   find "$LOCAL_DIR/db" -name 'db-*.sql.gz*' -type f -mtime "+$RETENTION_DAYS" -delete
   log "清理远端 > $RETENTION_DAYS 天"
-  ssh "$RHOST" "find '$RPATH/db' -type f -mtime +$RETENTION_DAYS -delete; \
+  ssh $SSH_OPTS "$RHOST" "find '$RPATH/db' -type f -mtime +$RETENTION_DAYS -delete; \
                 find '$RPATH/binlog' -type f -mtime +$RETENTION_DAYS -delete"
 else
   log "rclone → $RCLONE_REMOTE"

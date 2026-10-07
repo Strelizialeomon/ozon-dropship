@@ -53,3 +53,23 @@ PR #4 重审（owner 2026-10-07 点选「改」）的处置：
 |---|---|---|---|
 | 4-9 | 轻微 | 合并时点悬空 | 改：定「须在 A、E 之后合并」；总纲 §12.3 同步 |
 | 4-15 | 轻微 | 静态资源目录未写死 | 改：定 `frontend/dist` |
+
+PR #12 重审（owner 2026-10-07 点选「改」）的处置，原文见 PR #12 评论（路一 = 规格符合性，路二 = 对抗式找 bug）：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 12-1 | 严重 | 最新 dump 的坐标 binlog 文件被排除在外送之外：最新备份不可回放，最坏丢 24h 且演练会掩盖 | 改：dump 后补一次 `FLUSH LOGS` 关闭坐标文件再外送；restore-drill §5 写明真实 RPO 与收紧杠杆 |
+| 12-2 | 严重 | 备份 oneshot 无超时 + flock 独占：ssh/rsync 挂死后备份永久静默停摆 | 改：unit 加 `TimeoutStartSec=30min`；ssh 加 ConnectTimeout/ServerAlive/BatchMode，rsync 加 `--timeout=600` |
+| 12-3 | 中 | 演练命令无实例参数，照抄会打生产库 | 改：命令统一经 `$DRILL_MYSQL` 指向演练实例，并加「先自查实例」防呆步 |
+| 12-4 | 中 | 备份 unit 缺 `After=mysql.service`，`Persistent=true` 开机补跑会撞未就绪的库 | 改：加 `After=`/`Wants=mysql.service` |
+| 12-5 | 中 | install.md 的 scp/sudo 隐式假设矛盾（root 目标目录 vs 处处 sudo） | 改：§0 声明「root 经 ssh 操作」模型与普通用户 + sudo 的等效做法 |
+| 12-6 | 中 | goose 无安装命令；migrate.env 非 root 读不到 | 改：补交叉编译安装命令；迁移执行包进 `sudo sh -c` |
+| 12-7 | 中 | config.yaml 含 DB 密码却默认 0644 | 改：scp 落 /tmp 编辑后 `install -o root -g hub -m 640` 落位 |
+| 12-8 | 轻微 | redis include 注释对目标发行版不成立 | 改：删该括号说明，明写「包默认无可用 include 目录」 |
+| 12-9 | 轻微 | systemd 进程加固未披露 | 改：PR 正文补披露；deploy/README 加对表提示（ReadWritePaths） |
+| 12-10 | 轻微 | 线路实测 auth.env（临时机上放只读凭据）未披露 | 改：PR 正文补披露 |
+| 12-11 | 轻微 | 回放需 `BINLOG_ADMIN` 未写明，用备份账号会半途中止 | 改：restore-drill §3 写明回放用 root |
+| 12-12 | 轻微 | nohup 后台运行时 SIGINT 被忽略，停不掉 | 改：README 与脚本注释明确「用 TERM（kill）停」 |
+| 12-13 | 轻微 | raw.csv 标签含逗号会错列、统计全错 | 改：标签写入前替换逗号 |
+| 12-14 | 轻微 | §8 取证 `tr < /proc/$pid/environ` 重定向发生在 sudo 之前，非 root 读不到 | 改：包进 `sudo sh -c` |
+| 12-15 | 轻微 | 未装 rsync/rclone，备份外送可能 `command not found` | 改：安装节补 `apt install -y rsync`（rclone 方案同理） |
