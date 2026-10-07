@@ -1,0 +1,10 @@
+# 真配置不入库（只提交 config/config.example.yaml）
+config/config.yaml
+
+# 编译产物
+bin/
+*.test
+
+# 本地日志
+logs/
+*.log
