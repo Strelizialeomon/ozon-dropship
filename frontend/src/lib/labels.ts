@@ -58,18 +58,20 @@ export const channelLabel = (v: string | null | undefined): LabelSpec => spec(CH
 
 export const EXECUTOR: Record<string, string> = { auto: '自动', manual: '人工' };
 
-// ── 异常（总纲 §5.2 判定清单）─────────────────────────────────────────────
+// ── 异常（后端常量逐一对齐：backend/internal/order/exception.go:34-47）────────
 const EXCEPTION_CODE: Record<string, string> = {
   purchase_timeout: '超时未采购',
-  purchase_failed: '1688 下单失败',
+  alibaba_order_failed: '1688 下单失败',
   address_invalid: '地址校验失败',
   ship_deadline_near: '发货截止临近',
-  domestic_stalled: '国内段/中转点停滞',
+  domestic_stalled: '国内段停滞',
+  relay_stalled: '中转点停滞',
   ship_failed: '备货失败（ship_failed）',
   arbitration: '平台仲裁',
   unknown_status: '表外状态',
-  price_changed: '采购价变动',
-  tracking_stalled: '物流轨迹停滞',
+  hybrid_tpl: '混合物流类型（S1 不处理）',
+  unknown_tpl: '未知物流类型',
+  offer_mapping_missing: '缺货源映射',
 };
 
 export const exceptionCode = (v: string | null | undefined): string => v ? EXCEPTION_CODE[v] ?? v : '—';
@@ -99,7 +101,7 @@ export const credentialKind = (v: string | null | undefined): string => (v ? CRE
 const RELAY_KIND: Record<string, string> = { forwarder: '货代仓', own_warehouse: '自有仓' };
 export const relayKind = (v: string | null | undefined): string => (v ? RELAY_KIND[v] ?? v : '—');
 
-// 物流单号来源与 tpl_integration_type（总纲 §7.4）
+// 物流单号来源与 tpl_integration_type（总纲 §7.4；官方原文拼写 hybryd，见后端 order/status.go:85-87）
 export const TRACKING_SOURCE: Record<string, string> = { ozon: 'Ozon 生成', seller: '卖家回传' };
 
 const TPL_INTEGRATION: Record<string, string> = {
@@ -107,13 +109,18 @@ const TPL_INTEGRATION: Record<string, string> = {
   aggregator: '外部承运商·Ozon 登记（不传单号）',
   '3pl_tracking': '外部承运商·卖家登记（需传单号）',
   non_integrated: '卖家自送（需传单号+三段轨迹）',
-  hybrid: '俄邮混合（项目未涉及）',
+  hybryd: '俄邮混合（S1 不处理）',
+  hybrid: '俄邮混合（兼容别名）',
 };
 export const tplIntegration = (v: string | null | undefined): string => (v ? TPL_INTEGRATION[v] ?? v : '—');
-
-/** 需要我方回传单号的 tpl_integration_type（总纲 §7.4）。 */
-export const NEEDS_SELLER_TRACKING = new Set(['3pl_tracking', 'non_integrated']);
 
 // ── 货源 / 映射 ───────────────────────────────────────────────────────────
 const PLATFORM: Record<string, string> = { '1688': '1688', pdd: '拼多多', taobao: '淘宝' };
 export const platformLabel = (v: string | null | undefined): string => (v ? PLATFORM[v] ?? v : '—');
+
+const OFFER_STATUS: Record<string, LabelSpec> = {
+  active: { text: '在售', tone: 'success' },
+  out_of_stock: { text: '断货', tone: 'warning' },
+  invalid: { text: '失效', tone: 'destructive' },
+};
+export const offerStatus = (v: string | null | undefined): LabelSpec => spec(OFFER_STATUS, v);

@@ -1,8 +1,11 @@
 import { atom } from 'jotai';
 import type { ExceptionDTO } from '@/api/exceptions';
 
+/** 后端语义：不传 = 只看未处理（open）；'all' = 全部；'resolved' = 已处理。 */
+export type ExceptionStatusFilter = 'open' | 'resolved' | 'all';
+
 export interface ExceptionFilters {
-  status: string; // '' = 全部；open / resolved
+  status: ExceptionStatusFilter;
   ref_type: string;
   code: string;
   page: number;

@@ -1,6 +1,6 @@
-import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { useAtom, useAtomValue } from 'jotai';
 import { Search, ShoppingCart, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import type { OrderDTO } from '@/api/orders';
 import { storeOptionsAtom, useStoreOptionsActions } from '@/atoms/storeOptions';
@@ -13,10 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { formatDateTime, formatMoney } from '@/lib/format';
 import { ORDER_STATUS_OPTIONS, orderStatus, tplIntegration } from '@/lib/labels';
 import { OrderDetailDialog } from './components/OrderDetailDialog';
-import { useOrderBatchActions, useOrderListActions } from './actions';
+import { useOrderBatchActions, useOrderDetailActions, useOrderListActions } from './actions';
 import {
   orderBatchSubmittingAtom,
-  orderDetailAtom,
   orderFiltersAtom,
   ordersAtom,
   orderSelectionAtom,
@@ -30,14 +29,17 @@ export default function OrdersPage() {
   const loading = useAtomValue(ordersLoadingAtom);
   const filters = useAtomValue(orderFiltersAtom);
   const [selection, setSelection] = useAtom(orderSelectionAtom);
-  const setDetail = useSetAtom(orderDetailAtom);
   const batchSubmitting = useAtomValue(orderBatchSubmittingAtom);
   const storeOptions = useAtomValue(storeOptionsAtom);
   const [keywordInput, setKeywordInput] = useState(filters.keyword);
 
-  const { loadOrders, applyFilters, changePage, resetFilters } = useOrderListActions();
-  const { createPurchaseTasks } = useOrderBatchActions();
+  const { loadOrders, reloadOrders, applyFilters, changePage, resetFilters } = useOrderListActions();
+  const { planPurchase } = useOrderBatchActions();
+  const { loadOrderDetail } = useOrderDetailActions();
   const { ensureStores } = useStoreOptionsActions();
+
+  // 列表行只带 store_id：用店铺下拉的共享数据把店名映射出来
+  const storeName = useMemo(() => new Map(storeOptions.map((s) => [s.id, s.name])), [storeOptions]);
 
   useEffect(() => {
     void ensureStores();
@@ -48,12 +50,21 @@ export default function OrdersPage() {
 
   const selectedIds = Object.keys(selection);
 
-  async function onBatchCreateTasks(): Promise<void> {
-    const result = await createPurchaseTasks(selectedIds);
+  async function onBatchPlanPurchase(): Promise<void> {
+    const result = await planPurchase(selectedIds);
     if (!result) return;
-    toast.success(`已生成 ${result.acted} 个采购任务${result.skipped > 0 ? `，跳过 ${result.skipped} 单` : ''}`);
+    if (result.failed.length === 0) {
+      toast.success(`已生成 ${result.succeeded} 个采购任务`);
+    } else {
+      toast.warning(`成功 ${result.succeeded} 单、失败 ${result.failed.length} 单`, {
+        description: result.failed
+          .slice(0, 3)
+          .map((f) => `${f.id}: ${f.error}`)
+          .join('\n'),
+      });
+    }
     setSelection({});
-    void loadOrders(filters);
+    void reloadOrders();
   }
 
   const pagination: ServerPagination = {
@@ -112,14 +123,21 @@ export default function OrdersPage() {
           </Button>
         </div>
 
-        <Button variant='ghost' size='sm' onClick={resetFilters}>
+        <Button
+          variant='ghost'
+          size='sm'
+          onClick={() => {
+            setKeywordInput('');
+            resetFilters();
+          }}
+        >
           重置
         </Button>
 
         {selectedIds.length > 0 && (
           <div className='ml-auto flex items-center gap-2 rounded-md border bg-background px-3 py-1.5'>
             <span className='text-sm'>已选 {selectedIds.length} 单</span>
-            <Button size='sm' disabled={batchSubmitting} onClick={() => void onBatchCreateTasks()}>
+            <Button size='sm' disabled={batchSubmitting} onClick={() => void onBatchPlanPurchase()}>
               <ShoppingCart className='size-4' />
               生成采购任务
             </Button>
@@ -136,7 +154,7 @@ export default function OrdersPage() {
         getRowId={(o) => o.id}
         rowSelection={selection}
         onRowSelectionChange={setSelection}
-        onRowClick={(o) => setDetail(o)}
+        onRowClick={(o) => void loadOrderDetail(o.id)}
         pagination={pagination}
         emptyText='没有符合条件的订单'
         columns={[
@@ -144,18 +162,31 @@ export default function OrdersPage() {
           {
             id: 'posting_number',
             header: 'posting',
+            accessorFn: (o) => o.posting_number,
             cell: ({ row }) => <span className='font-mono text-xs'>{row.original.posting_number}</span>,
           },
-          { id: 'store', header: '店铺', cell: ({ row }) => row.original.store_name },
-          { id: 'status', header: '状态', cell: ({ row }) => <StatusBadge spec={orderStatus(row.original.status)} /> },
+          {
+            id: 'store',
+            header: '店铺',
+            accessorFn: (o) => storeName.get(o.store_id) ?? o.store_id,
+            cell: ({ row }) => storeName.get(row.original.store_id) ?? row.original.store_id,
+          },
+          {
+            id: 'status',
+            header: '状态',
+            accessorFn: (o) => o.status,
+            cell: ({ row }) => <StatusBadge spec={orderStatus(row.original.status)} />,
+          },
           {
             id: 'ozon_status',
             header: 'Ozon 状态',
+            accessorFn: (o) => o.ozon_status,
             cell: ({ row }) => <span className='text-xs text-muted-foreground'>{row.original.ozon_status}</span>,
           },
           {
             id: 'ship_deadline',
             header: '发货截止',
+            accessorFn: (o) => o.ship_deadline ?? '',
             cell: ({ row }) => {
               const d = row.original.ship_deadline;
               const urgent = d && new Date(d).getTime() - Date.now() < 24 * 3600_000;
@@ -165,12 +196,13 @@ export default function OrdersPage() {
           {
             id: 'amount',
             header: '金额',
+            accessorFn: (o) => Number(o.total_amount),
             cell: ({ row }) => formatMoney(row.original.total_amount, row.original.currency),
           },
-          { id: 'items', header: '商品数', cell: ({ row }) => row.original.items.length },
           {
             id: 'tpl',
             header: '物流方式',
+            accessorFn: (o) => o.tpl_integration_type ?? '',
             cell: ({ row }) => (
               <span className='text-xs text-muted-foreground'>{tplIntegration(row.original.tpl_integration_type)}</span>
             ),

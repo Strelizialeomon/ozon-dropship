@@ -23,12 +23,13 @@ export interface CredentialReq {
   expires_at?: string | null; // 不传 = 保留原到期时间（轮换不误抹）
 }
 
-/** GET /api/credentials?store_id=xxx（不传 = 全部）。 */
+/** GET /api/credentials?store_id=xxx
+ *  storeId: undefined = 全部（不传参数）；'' = 企业级（后端语义：传空串 = store_id IS NULL）；其他 = 店 ID。 */
 export function listCredentials(storeId?: string): Promise<CredentialDTO[]> {
   return request<CredentialDTO[]>({
     method: 'GET',
     url: '/api/credentials',
-    params: storeId ? { store_id: storeId } : undefined,
+    params: storeId === undefined ? undefined : { store_id: storeId },
   });
 }
 

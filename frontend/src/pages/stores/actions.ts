@@ -1,4 +1,4 @@
-import { useSetAtom } from 'jotai';
+import { getDefaultStore, useSetAtom } from 'jotai';
 import { type CredentialReq, listCredentials, putCredential } from '@/api/credentials';
 import {
   createStore as apiCreateStore,
@@ -7,11 +7,21 @@ import {
   type StoreReq,
   updateStore as apiUpdateStore,
 } from '@/api/stores';
-import { credentialsAtom, credentialsLoadingAtom, storesAtom, storesLoadingAtom } from './store';
+import { useStoreOptionsActions } from '@/atoms/storeOptions';
+import {
+  credentialsAtom,
+  credentialsLoadingAtom,
+  credentialStoreFilterAtom,
+  credentialStoreParam,
+  storesAtom,
+  storesLoadingAtom,
+} from './store';
 
 export function useStoreActions() {
   const setStores = useSetAtom(storesAtom);
   const setLoading = useSetAtom(storesLoadingAtom);
+  // 店铺变了要让跨页的「店铺下拉」缓存一起失效（评审路二 #8）
+  const { refreshStores } = useStoreOptionsActions();
 
   async function loadStores(): Promise<void> {
     setLoading(true);
@@ -28,6 +38,7 @@ export function useStoreActions() {
     try {
       await apiCreateStore(req);
       await loadStores();
+      void refreshStores();
       return true;
     } catch {
       return false;
@@ -38,6 +49,7 @@ export function useStoreActions() {
     try {
       await apiUpdateStore(id, req);
       await loadStores();
+      void refreshStores();
       return true;
     } catch {
       return false;
@@ -48,6 +60,7 @@ export function useStoreActions() {
     try {
       await apiDeleteStore(id);
       await loadStores();
+      void refreshStores();
       return true;
     } catch {
       return false;
@@ -72,6 +85,12 @@ export function useCredentialActions() {
     }
   }
 
+  /** 用「此刻」的过滤条件重拉（保存/轮换后刷新用）。 */
+  async function reloadCredentials(): Promise<void> {
+    const filter = getDefaultStore().get(credentialStoreFilterAtom);
+    await loadCredentials(credentialStoreParam(filter));
+  }
+
   async function saveCredential(req: CredentialReq): Promise<boolean> {
     try {
       await putCredential(req);
@@ -81,5 +100,5 @@ export function useCredentialActions() {
     }
   }
 
-  return { loadCredentials, saveCredential };
+  return { loadCredentials, reloadCredentials, saveCredential };
 }

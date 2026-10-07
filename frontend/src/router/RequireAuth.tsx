@@ -3,8 +3,9 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { setUnauthorizedListener } from '@/api/client';
 import { useAppActions } from '@/atoms/appActions';
 
-// 登录守卫：没会话就送回登录页（子 spec §6 自定细节：守卫包在 <Routes> 外层，
-// 做成布局路由，页面间切换不卸载、401 监听只注册一次）。
+// 登录守卫：没会话就送回登录页。做法是 <Routes> 内的布局路由（登录页是它的同级兄弟）——
+// 页面之间来回切时守卫不卸载，401 监听也就只注册一次。功能上等于「守卫罩住除登录页外的全部路由」
+// （spec §6 的「包在 <Routes> 外层」就是这个意思，落到声明式路由里是布局路由这条写法）。
 
 export type Gate = 'checking' | 'allowed' | 'anonymous';
 

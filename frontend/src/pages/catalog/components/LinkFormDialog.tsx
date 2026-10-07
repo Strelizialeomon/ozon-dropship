@@ -1,6 +1,9 @@
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useAtom, useAtomValue } from 'jotai';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
+import { z } from 'zod';
 import { storeOptionsAtom } from '@/atoms/storeOptions';
 import { Button } from '@/components/ui/button';
 import {
@@ -14,34 +17,40 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { platformLabel } from '@/lib/labels';
 import { useLinkActions } from '../actions';
-import { linkFiltersAtom, linkModalAtom } from '../store';
+import { catalogSubmittingAtom, linkModalAtom, offersAtom } from '../store';
 
-interface LinkForm {
-  store_id: string;
-  ozon_offer_id: string;
-  supplier_offer_id: string;
-  priority: string;
-  target_stock: string;
-}
+const int = (msg: string, min: number) =>
+  z.string().refine((v) => Number.isInteger(Number(v)) && Number(v) >= min, msg);
+
+const schema = z.object({
+  store_id: z.string().min(1, '请选择店铺'),
+  ozon_offer_id: z.string().min(1, '请填 Ozon offer_id'),
+  supplier_offer_id: z.string().min(1, '请选择货源商品'),
+  priority: int('优先级要填 ≥ 1 的整数（1 = 主货源）', 1),
+  target_stock: int('目标库存要填 ≥ 0 的整数', 0),
+});
+
+type LinkForm = z.infer<typeof schema>;
 
 const EMPTY: LinkForm = { store_id: '', ozon_offer_id: '', supplier_offer_id: '', priority: '1', target_stock: '0' };
 
 export function LinkFormDialog() {
   const [modal, setModal] = useAtom(linkModalAtom);
-  const filters = useAtomValue(linkFiltersAtom);
+  const submitting = useAtomValue(catalogSubmittingAtom);
   const storeOptions = useAtomValue(storeOptionsAtom);
-  const { createLink, updateLink, loadLinks } = useLinkActions();
-  const [form, setForm] = useState<LinkForm>(EMPTY);
-  const [error, setError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const offers = useAtomValue(offersAtom);
+  const { createLink, updateLink, reloadLinks } = useLinkActions();
+
+  const form = useForm<LinkForm>({ resolver: zodResolver(schema), defaultValues: EMPTY });
+  const isEdit = modal?.mode === 'edit';
 
   useEffect(() => {
     if (!modal) return;
-    setError('');
     if (modal.mode === 'edit') {
       const l = modal.link;
-      setForm({
+      form.reset({
         store_id: l.store_id,
         ozon_offer_id: l.ozon_offer_id,
         supplier_offer_id: l.supplier_offer_id,
@@ -49,36 +58,36 @@ export function LinkFormDialog() {
         target_stock: String(l.target_stock),
       });
     } else {
-      setForm(EMPTY);
+      form.reset(EMPTY);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modal]);
 
-  function patch(p: Partial<LinkForm>): void {
-    setForm((prev) => ({ ...prev, ...p }));
-  }
-
-  async function onSubmit(): Promise<void> {
-    if (!form.store_id) return setError('请选择店铺');
-    if (!form.ozon_offer_id.trim()) return setError('请填写 Ozon offer_id');
-    if (!form.supplier_offer_id.trim()) return setError('请填写货源商品 ID');
-    if (!Number.isInteger(Number(form.priority)) || Number(form.priority) < 1) {
-      return setError('优先级要填正整数（1 = 主货源）');
+  async function onSubmit(values: LinkForm): Promise<void> {
+    if (isEdit && modal?.mode === 'edit') {
+      // 后端 PUT 只收 priority / target_stock；改店或改商品要删了重建
+      const ok = await updateLink(modal.link.id, {
+        priority: Number(values.priority),
+        target_stock: Number(values.target_stock),
+      });
+      if (ok) {
+        toast.success('映射已更新');
+        setModal(null);
+        void reloadLinks();
+      }
+      return;
     }
-
-    setSubmitting(true);
-    const body = {
-      store_id: form.store_id,
-      ozon_offer_id: form.ozon_offer_id.trim(),
-      supplier_offer_id: form.supplier_offer_id.trim(),
-      priority: Number(form.priority),
-      target_stock: Number(form.target_stock) || 0,
-    };
-    const ok = modal?.mode === 'edit' ? await updateLink(modal.link.id, body) : await createLink(body);
-    setSubmitting(false);
+    const ok = await createLink({
+      store_id: values.store_id,
+      ozon_offer_id: values.ozon_offer_id.trim(),
+      supplier_offer_id: values.supplier_offer_id,
+      priority: Number(values.priority),
+      target_stock: Number(values.target_stock),
+    });
     if (ok) {
-      toast.success(modal?.mode === 'edit' ? '映射已更新' : '映射已添加');
+      toast.success('映射已添加');
       setModal(null);
-      void loadLinks(filters);
+      void reloadLinks();
     }
   }
 
@@ -87,75 +96,108 @@ export function LinkFormDialog() {
       {modal && (
         <DialogContent className='max-w-md'>
           <DialogHeader>
-            <DialogTitle>{modal.mode === 'edit' ? '编辑映射' : '添加映射'}</DialogTitle>
+            <DialogTitle>{isEdit ? '编辑映射' : '添加映射'}</DialogTitle>
             <DialogDescription>
-              按店映射：同一 Ozon offer_id 允许多个货源，按优先级排主备（1 = 主）。
+              {isEdit
+                ? '店铺 / 商品 / 货源不可改（后端 PUT 只收优先级与目标库存）；要换请删除后重建。'
+                : '按店映射：同一 Ozon offer_id 允许多个货源，按优先级排主备（1 = 主）。'}
             </DialogDescription>
           </DialogHeader>
-          <div className='space-y-4'>
-            <div className='space-y-2'>
-              <Label>店铺</Label>
-              <Select value={form.store_id} onValueChange={(v) => patch({ store_id: v })}>
-                <SelectTrigger className='w-full'>
-                  <SelectValue placeholder='选择店铺' />
-                </SelectTrigger>
-                <SelectContent>
-                  {storeOptions.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='link-ozon'>Ozon offer_id</Label>
-              <Input
-                id='link-ozon'
-                value={form.ozon_offer_id}
-                onChange={(e) => patch({ ozon_offer_id: e.target.value })}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='link-supplier'>货源商品 ID（supplier_offer_id）</Label>
-              <Input
-                id='link-supplier'
-                placeholder='从「货源商品」页复制 ID'
-                value={form.supplier_offer_id}
-                onChange={(e) => patch({ supplier_offer_id: e.target.value })}
-              />
-            </div>
+          <form className='space-y-4' onSubmit={form.handleSubmit(onSubmit)}>
+            {isEdit
+              ? (
+                <div className='space-y-1 rounded-md bg-muted p-3 text-sm'>
+                  <div>
+                    店铺：{storeOptions.find((s) => s.id === form.getValues('store_id'))?.name
+                      ?? form.getValues('store_id')}
+                  </div>
+                  <div className='font-mono text-xs'>Ozon offer_id：{form.getValues('ozon_offer_id')}</div>
+                  <div className='font-mono text-xs'>货源：{form.getValues('supplier_offer_id')}</div>
+                </div>
+              )
+              : (
+                <>
+                  <div className='space-y-2'>
+                    <Label>店铺</Label>
+                    <Select
+                      value={form.watch('store_id')}
+                      onValueChange={(v) => form.setValue('store_id', v, { shouldValidate: true })}
+                    >
+                      <SelectTrigger className='w-full'>
+                        <SelectValue placeholder='选择店铺' />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {storeOptions.map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {s.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {form.formState.errors.store_id && (
+                      <p className='text-sm text-destructive'>{form.formState.errors.store_id.message}</p>
+                    )}
+                  </div>
+                  <div className='space-y-2'>
+                    <Label htmlFor='link-ozon'>Ozon offer_id</Label>
+                    <Input id='link-ozon' {...form.register('ozon_offer_id')} />
+                    {form.formState.errors.ozon_offer_id && (
+                      <p className='text-sm text-destructive'>{form.formState.errors.ozon_offer_id.message}</p>
+                    )}
+                  </div>
+                  <div className='space-y-2'>
+                    <Label>货源商品</Label>
+                    <Select
+                      value={form.watch('supplier_offer_id')}
+                      onValueChange={(v) => form.setValue('supplier_offer_id', v, { shouldValidate: true })}
+                    >
+                      <SelectTrigger className='w-full'>
+                        <SelectValue placeholder='选一个货源商品' />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {offers.map((o) => (
+                          <SelectItem key={o.id} value={o.id}>
+                            {platformLabel(o.platform)} · {o.item_id}
+                            {o.sku_id ? ` · ${o.sku_id}` : ''} · ¥{o.purchase_price}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {form.formState.errors.supplier_offer_id && (
+                      <p className='text-sm text-destructive'>{form.formState.errors.supplier_offer_id.message}</p>
+                    )}
+                    {offers.length === 0 && (
+                      <p className='text-xs text-muted-foreground'>还没有货源商品，先去「货源商品」页加一条。</p>
+                    )}
+                  </div>
+                </>
+              )}
+
             <div className='grid grid-cols-2 gap-4'>
               <div className='space-y-2'>
                 <Label htmlFor='link-priority'>优先级</Label>
-                <Input
-                  id='link-priority'
-                  type='number'
-                  min={1}
-                  value={form.priority}
-                  onChange={(e) => patch({ priority: e.target.value })}
-                />
+                <Input id='link-priority' type='number' min={1} {...form.register('priority')} />
+                {form.formState.errors.priority && (
+                  <p className='text-sm text-destructive'>{form.formState.errors.priority.message}</p>
+                )}
               </div>
               <div className='space-y-2'>
                 <Label htmlFor='link-target'>目标库存</Label>
-                <Input
-                  id='link-target'
-                  type='number'
-                  value={form.target_stock}
-                  onChange={(e) => patch({ target_stock: e.target.value })}
-                />
+                <Input id='link-target' type='number' min={0} {...form.register('target_stock')} />
+                {form.formState.errors.target_stock && (
+                  <p className='text-sm text-destructive'>{form.formState.errors.target_stock.message}</p>
+                )}
               </div>
             </div>
-          </div>
-          {error && <p className='text-sm text-destructive'>{error}</p>}
-          <DialogFooter>
-            <Button variant='outline' onClick={() => setModal(null)} disabled={submitting}>
-              取消
-            </Button>
-            <Button onClick={() => void onSubmit()} disabled={submitting}>
-              {submitting ? '保存中…' : '保存'}
-            </Button>
-          </DialogFooter>
+            <DialogFooter>
+              <Button type='button' variant='outline' onClick={() => setModal(null)} disabled={submitting}>
+                取消
+              </Button>
+              <Button type='submit' disabled={submitting}>
+                {submitting ? '保存中…' : '保存'}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       )}
     </Dialog>

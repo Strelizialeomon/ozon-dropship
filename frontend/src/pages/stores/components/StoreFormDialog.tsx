@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { listRelayPoints, type RelayPointDTO } from '@/api/shipments';
 import { storeModalAtom } from '../store';
 import { useStoreActions } from '../actions';
 
@@ -36,12 +37,24 @@ export function StoreFormDialog() {
   const [modal, setModal] = useAtom(storeModalAtom);
   const { createStore, updateStore } = useStoreActions();
   const [submitting, setLocalSubmitting] = useState(false);
+  // 中转点下拉的候选（S1-D 已合并，/api/relay-points 可用）：本弹窗自己的选项数据，就近拉一次
+  const [relayOptions, setRelayOptions] = useState<RelayPointDTO[]>([]);
 
   const form = useForm<StoreForm>({
     resolver: zodResolver(schema),
     defaultValues: emptyValues(),
   });
 
+  useEffect(() => {
+    if (!modal) return;
+    void listRelayPoints()
+      .then(setRelayOptions)
+      .catch(() => {
+        /* 拉不到就只显示「不指定」，拦截器已提示 */
+      });
+  }, [modal]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!modal) return;
     if (modal.mode === 'edit') {
@@ -127,9 +140,23 @@ export function StoreFormDialog() {
                 <Input id='store-currency' placeholder='CNY' {...form.register('currency')} />
               </div>
               <div className='space-y-2'>
-                <Label htmlFor='store-relay'>默认中转点 ID（可空）</Label>
-                {/* 中转点下拉等 D 的 /api/relay-points 合并后再换成选择器（挂账在 PR 说明里） */}
-                <Input id='store-relay' {...form.register('default_relay_point_id')} />
+                <Label>默认中转点</Label>
+                <Select
+                  value={form.watch('default_relay_point_id') || '_none'}
+                  onValueChange={(v) => form.setValue('default_relay_point_id', v === '_none' ? '' : v)}
+                >
+                  <SelectTrigger className='w-full'>
+                    <SelectValue placeholder='不指定' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='_none'>不指定</SelectItem>
+                    {relayOptions.map((r) => (
+                      <SelectItem key={r.id} value={r.id}>
+                        {r.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className='space-y-2'>
                 <Label>状态</Label>

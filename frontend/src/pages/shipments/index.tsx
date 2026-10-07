@@ -1,18 +1,18 @@
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
-import { Download, Plus, Search } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Download, Plus } from 'lucide-react';
+import { useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
-import { handoverExportUrl, type ShipmentDTO } from '@/api/shipments';
+import { handoverExportUrl, type ShipmentListRowDTO } from '@/api/shipments';
+import { storeOptionsAtom, useStoreOptionsActions } from '@/atoms/storeOptions';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { DataTable, type ServerPagination } from '@/components/DataTable';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { formatDateTime } from '@/lib/format';
-import { NEEDS_SELLER_TRACKING, orderStatus, relayKind, tplIntegration, TRACKING_SOURCE } from '@/lib/labels';
+import { orderStatus, relayKind, tplIntegration, TRACKING_SOURCE } from '@/lib/labels';
 import { RelayPointFormDialog } from './components/RelayPointFormDialog';
 import { TrackingDialog } from './components/TrackingDialog';
 import { useRelayPointActions, useShipmentActions } from './actions';
@@ -32,14 +32,14 @@ import {
   shipmentTrackingTargetAtom,
 } from './store';
 
-/** 行上能做什么（照总纲 §5.7 的推进链推导）。 */
-function shipmentActions(s: ShipmentDTO) {
+/** 行上能做什么：状态推进链 + 后端给的 tracking_action（总纲 §5.7 / §7.4）。 */
+function rowActions(row: ShipmentListRowDTO) {
+  const atRelayOrLater = row.order_status === 'at_relay' || row.order_status === 'handed_over';
   return {
-    receive: s.order_status === 'inbound',
-    ship: s.order_status === 'at_relay',
-    label: s.order_status === 'at_relay' || s.order_status === 'handed_over',
-    tracking: NEEDS_SELLER_TRACKING.has(s.tpl_integration_type)
-      && (s.order_status === 'at_relay' || s.order_status === 'handed_over'),
+    receive: row.order_status === 'inbound',
+    ship: row.order_status === 'at_relay',
+    label: atRelayOrLater,
+    tracking: row.tracking_action === 'set' && atRelayOrLater,
   };
 }
 
@@ -58,12 +58,17 @@ export default function ShipmentsPage() {
   const relayPointsLoading = useAtomValue(relayPointsLoadingAtom);
   const setRelayModal = useSetAtom(relayModalAtom);
   const [relayDeleting, setRelayDeleting] = useAtom(relayDeletingAtom);
+  const storeOptions = useAtomValue(storeOptionsAtom);
 
-  const { loadShipments, applyFilters, changePage, receive, ship, openLabel } = useShipmentActions();
+  const { loadShipments, reloadShipments, applyFilters, changePage, receive, ship, openLabel } = useShipmentActions();
   const relayActions = useRelayPointActions();
-  const [keywordInput, setKeywordInput] = useState(filters.keyword);
+  const { ensureStores } = useStoreOptionsActions();
+
+  const storeName = useMemo(() => new Map(storeOptions.map((s) => [s.id, s.name])), [storeOptions]);
+  const relayName = useMemo(() => new Map(relayPoints.map((p) => [p.id, p.name])), [relayPoints]);
 
   useEffect(() => {
+    void ensureStores();
     relayActions.loadRelayPoints();
     void loadShipments(filters);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -74,17 +79,17 @@ export default function ShipmentsPage() {
     const ok = await receive(receiveTarget.order_id);
     if (ok) {
       toast.success('已登记签收');
-      void loadShipments(filters);
+      void reloadShipments();
     }
     setReceiveTarget(null);
   }
 
   async function onShip(): Promise<void> {
     if (!shipTarget) return;
-    const ok = await ship(shipTarget.order_id);
-    if (ok) {
-      toast.success('已备货交运');
-      void loadShipments(filters);
+    const res = await ship(shipTarget.order_id);
+    if (res.ok) {
+      toast.success('已备货交运', { description: res.notes?.join('；') || undefined });
+      void reloadShipments();
     }
     setShipTarget(null);
   }
@@ -149,19 +154,6 @@ export default function ShipmentsPage() {
               </SelectContent>
             </Select>
 
-            <div className='flex items-center gap-1'>
-              <Input
-                className='w-52'
-                placeholder='posting'
-                value={keywordInput}
-                onChange={(e) => setKeywordInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && applyFilters({ keyword: keywordInput })}
-              />
-              <Button variant='outline' size='icon' onClick={() => applyFilters({ keyword: keywordInput })}>
-                <Search className='size-4' />
-              </Button>
-            </div>
-
             <Button
               variant='outline'
               size='sm'
@@ -187,18 +179,47 @@ export default function ShipmentsPage() {
               {
                 id: 'posting',
                 header: 'posting',
+                accessorFn: (s) => s.posting_number,
                 cell: ({ row }) => <span className='font-mono text-xs'>{row.original.posting_number}</span>,
               },
-              { id: 'store', header: '店铺', cell: ({ row }) => row.original.store_name },
+              {
+                id: 'store',
+                header: '店铺',
+                accessorFn: (s) => storeName.get(s.store_id) ?? s.store_id,
+                cell: ({ row }) => storeName.get(row.original.store_id) ?? row.original.store_id,
+              },
               {
                 id: 'status',
                 header: '订单状态',
+                accessorFn: (s) => s.order_status,
                 cell: ({ row }) => <StatusBadge spec={orderStatus(row.original.order_status)} />,
               },
-              { id: 'relay', header: '中转点', cell: ({ row }) => row.original.relay_point_name || '—' },
+              {
+                id: 'relay',
+                header: '中转点',
+                accessorFn: (s) => (s.relay_point_id ? relayName.get(s.relay_point_id) ?? '' : ''),
+                cell: ({ row }) =>
+                  row.original.relay_point_id
+                    ? relayName.get(row.original.relay_point_id) ?? row.original.relay_point_id
+                    : '—',
+              },
+              {
+                id: 'domestic',
+                header: '国内件',
+                accessorFn: (s) => s.domestic_tracking_no,
+                cell: ({ row }) => (
+                  <div className='text-xs'>
+                    <div className='font-mono'>{row.original.domestic_tracking_no || '—'}</div>
+                    {row.original.domestic_carrier && (
+                      <div className='text-muted-foreground'>{row.original.domestic_carrier}</div>
+                    )}
+                  </div>
+                ),
+              },
               {
                 id: 'deadline',
                 header: '发货截止',
+                accessorFn: (s) => s.ship_deadline ?? '',
                 cell: ({ row }) => {
                   const d = row.original.ship_deadline;
                   const urgent = d && new Date(d).getTime() - Date.now() < 24 * 3600_000;
@@ -208,33 +229,43 @@ export default function ShipmentsPage() {
               {
                 id: 'tracking',
                 header: '国际段单号',
-                cell: ({ row }) => (
-                  <div className='text-xs'>
-                    <div className='font-mono'>{row.original.tracking_no || '—'}</div>
-                    {row.original.tracking_source && (
-                      <div className='text-muted-foreground'>
-                        {TRACKING_SOURCE[row.original.tracking_source] ?? row.original.tracking_source}
-                      </div>
-                    )}
-                  </div>
-                ),
+                accessorFn: (s) => s.shipment?.tracking_no ?? '',
+                cell: ({ row }) => {
+                  const sh = row.original.shipment;
+                  return (
+                    <div className='text-xs'>
+                      <div className='font-mono'>{sh?.tracking_no || '—'}</div>
+                      {sh?.tracking_source && (
+                        <div className='text-muted-foreground'>
+                          {TRACKING_SOURCE[sh.tracking_source] ?? sh.tracking_source}
+                        </div>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 id: 'tpl',
                 header: '物流方式',
+                accessorFn: (s) => s.tpl_integration_type ?? '',
                 cell: ({ row }) => (
                   <span className='text-xs text-muted-foreground'>
                     {tplIntegration(row.original.tpl_integration_type)}
                   </span>
                 ),
               },
-              { id: 'handed', header: '交运时间', cell: ({ row }) => formatDateTime(row.original.handed_over_at) },
+              {
+                id: 'handed',
+                header: '交运时间',
+                accessorFn: (s) => s.shipment?.handed_over_at ?? '',
+                cell: ({ row }) => formatDateTime(row.original.shipment?.handed_over_at ?? null),
+              },
               {
                 id: 'actions',
                 header: '操作',
                 cell: ({ row }) => {
                   const s = row.original;
-                  const a = shipmentActions(s);
+                  const a = rowActions(s);
                   return (
                     <div className='flex flex-wrap gap-1'>
                       {a.receive && (
@@ -288,18 +319,35 @@ export default function ShipmentsPage() {
             getRowId={(p) => p.id}
             emptyText='还没有中转点，先建一个'
             columns={[
-              { id: 'name', header: '名称', cell: ({ row }) => row.original.name },
-              { id: 'kind', header: '类型', cell: ({ row }) => relayKind(row.original.kind) },
+              { id: 'name', header: '名称', accessorFn: (p) => p.name, cell: ({ row }) => row.original.name },
+              {
+                id: 'kind',
+                header: '类型',
+                accessorFn: (p) => p.kind,
+                cell: ({ row }) => relayKind(row.original.kind),
+              },
               {
                 id: 'address',
                 header: '收货地址',
+                accessorFn: (p) => p.address,
                 cell: ({ row }) => (
                   <span className='line-clamp-2 max-w-md text-xs' title={row.original.address}>
-                    {row.original.address}
+                    {row.original.address || '—'}
                   </span>
                 ),
               },
-              { id: 'contact', header: '联系人', cell: ({ row }) => row.original.contact || '—' },
+              {
+                id: 'contact',
+                header: '联系人',
+                accessorFn: (p) => p.contact,
+                cell: ({ row }) => row.original.contact || '—',
+              },
+              {
+                id: 'status',
+                header: '状态',
+                accessorFn: (p) => p.status,
+                cell: ({ row }) => (row.original.status === 'active' ? '启用' : '停用'),
+              },
               {
                 id: 'actions',
                 header: '操作',
@@ -360,6 +408,7 @@ export default function ShipmentsPage() {
         description='已配为该默认中转点的店铺需要改配。'
         confirmText='删除'
         destructive
+        busy={submitting}
         onConfirm={() => void onDeleteRelay()}
       />
     </div>

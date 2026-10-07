@@ -20,6 +20,7 @@ import {
   credentialsAtom,
   credentialsLoadingAtom,
   credentialStoreFilterAtom,
+  credentialStoreParam,
   pageTabAtom,
   storeDeletingAtom,
   storeModalAtom,
@@ -138,11 +139,10 @@ export default function StoresPage() {
         <TabsContent value='credentials' className='mt-4 space-y-3'>
           <div className='flex items-center justify-between'>
             <Select
-              value={credStoreFilter || '_all'}
+              value={credStoreFilter}
               onValueChange={(v) => {
-                const val = v === '_all' ? '' : v;
-                setCredStoreFilter(val);
-                void loadCredentials(val || undefined);
+                setCredStoreFilter(v);
+                void loadCredentials(credentialStoreParam(v));
               }}
             >
               <SelectTrigger className='w-52'>
@@ -150,7 +150,7 @@ export default function StoresPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value='_all'>全部</SelectItem>
-                <SelectItem value=''>企业级</SelectItem>
+                <SelectItem value='_ent'>企业级</SelectItem>
                 {stores.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
                     {s.name}

@@ -49,7 +49,9 @@ interface CredentialForm {
 }
 
 const EMPTY: CredentialForm = {
-  store_id: '',
+  // 归属哨兵：'_ent' = 企业级（提交时映射成空串）；其他 = 店 ID。
+  // 不用空串当企业级值：Radix Select 不允许空串值，且会与「没选」混淆（评审路二 #2）。
+  store_id: '_ent',
   kind: 'ozon_api_key',
   expires_at: '',
   api_key: '',
@@ -62,7 +64,7 @@ const EMPTY: CredentialForm = {
 export function CredentialFormDialog() {
   const [modal, setModal] = useAtom(credentialModalAtom);
   const stores = useAtomValue(storesAtom);
-  const { saveCredential } = useCredentialActions();
+  const { saveCredential, reloadCredentials } = useCredentialActions();
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -76,9 +78,9 @@ export function CredentialFormDialog() {
     if (!modal) return;
     setFormError('');
     if (modal.mode === 'create') {
-      form.reset({ ...EMPTY, store_id: modal.storeId ?? '' });
+      form.reset({ ...EMPTY, store_id: modal.storeId ?? '_ent' });
     } else {
-      form.reset({ ...EMPTY, store_id: modal.credential.store_id, kind: modal.credential.kind });
+      form.reset({ ...EMPTY, store_id: modal.credential.store_id || '_ent', kind: modal.credential.kind });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modal]);
@@ -99,7 +101,7 @@ export function CredentialFormDialog() {
     }
     setSubmitting(true);
     const ok = await saveCredential({
-      store_id: values.store_id,
+      store_id: values.store_id === '_ent' ? '' : values.store_id,
       kind: values.kind,
       payload,
       // 空 = 不传（后端语义：保留原到期时间，轮换时不会误抹）
@@ -109,6 +111,7 @@ export function CredentialFormDialog() {
     if (ok) {
       toast.success(rotateTarget ? '凭据已轮换' : '凭据已保存');
       setModal(null);
+      void reloadCredentials(); // 保存后刷新列表，免得看不到刚存的（评审路二 #5）
     }
   }
 
@@ -136,7 +139,7 @@ export function CredentialFormDialog() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value=''>企业级（1688）</SelectItem>
+                      <SelectItem value='_ent'>企业级（1688）</SelectItem>
                       {stores.map((s) => (
                         <SelectItem key={s.id} value={s.id}>
                           {s.name}

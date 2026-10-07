@@ -1,4 +1,4 @@
-// 异常池（S1-D 的接口清单：/api/exceptions —— 列表 / 处理）。⚠️ 待 D 落地对齐。
+// 异常池接口（后端已实现：backend/internal/order/exception.go）。
 import { request } from './client';
 
 export type ExceptionRefType = 'order' | 'purchase_task' | 'shipment';
@@ -7,33 +7,36 @@ export interface ExceptionDTO {
   id: string;
   ref_type: ExceptionRefType;
   ref_id: string;
-  code: string; // 总纲 §5.2 判定清单（purchase_timeout / ship_failed / arbitration …）
-  detail: string;
+  code: string; // 后端常量见 order/exception.go:34-47
+  detail: string | null;
   status: 'open' | 'resolved';
   handled_by: string | null;
   handled_at: string | null;
   note: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface ExceptionListQuery {
+  ref_type?: string;
+  ref_id?: string;
+  code?: string;
+  /** 不传 = open（后端默认只看未处理）；'all' = 全部。 */
+  status?: string;
   page: number;
   page_size: number;
-  status?: string;
-  ref_type?: string;
-  code?: string;
 }
 
 export interface ExceptionListData {
   total: number;
-  list: ExceptionDTO[];
+  items: ExceptionDTO[];
 }
 
 export function listExceptions(q: ExceptionListQuery): Promise<ExceptionListData> {
   return request<ExceptionListData>({ method: 'GET', url: '/api/exceptions', params: q });
 }
 
-/** 标记已处理（同一对象同一 code 未处理时去重，处理掉才允许再进池）。 */
+/** 标记已处理（备注可空；已处理再点一次不报错）。 */
 export function resolveException(id: string, note: string): Promise<ExceptionDTO> {
   return request<ExceptionDTO>({ method: 'POST', url: `/api/exceptions/${id}/resolve`, data: { note } });
 }

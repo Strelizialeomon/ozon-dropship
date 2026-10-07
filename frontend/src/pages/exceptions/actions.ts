@@ -1,4 +1,4 @@
-import { useSetAtom } from 'jotai';
+import { getDefaultStore, useSetAtom } from 'jotai';
 import { listExceptions, resolveException } from '@/api/exceptions';
 import {
   type ExceptionFilters,
@@ -24,13 +24,22 @@ export function useExceptionActions() {
     try {
       const data = await listExceptions(q);
       if (id !== reqSeq) return;
-      setList(data.list);
+      setList(data.items);
       setTotal(data.total);
+      const pageCount = Math.max(1, Math.ceil(data.total / q.page_size));
+      if (q.page > pageCount) {
+        void loadExceptions({ ...q, page: pageCount });
+      }
     } catch {
       // 拦截器已提示
     } finally {
       if (id === reqSeq) setLoading(false);
     }
+  }
+
+  /** 用「此刻」的筛选条件重拉（处理完一条后刷新用）。 */
+  async function reloadExceptions(): Promise<void> {
+    await loadExceptions(getDefaultStore().get(exceptionFiltersAtom));
   }
 
   function applyFilters(patch: Partial<ExceptionFilters>): void {
@@ -63,5 +72,5 @@ export function useExceptionActions() {
     }
   }
 
-  return { loadExceptions, applyFilters, changePage, resolve };
+  return { loadExceptions, reloadExceptions, applyFilters, changePage, resolve };
 }

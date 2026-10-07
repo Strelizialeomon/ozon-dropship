@@ -27,6 +27,21 @@ function names(): string[] {
 }
 
 describe('DataTable', () => {
+  it('accessorFn 列可排序（真实页面的列写法；此前只有 id+cell 导致排序入口被静默关掉）', async () => {
+    const fnColumns: ColumnDef<Row, unknown>[] = [
+      { id: 'name', header: '名称', accessorFn: (r) => r.name, cell: ({ row }) => row.original.name },
+      { id: 'n', header: '数值', accessorFn: (r) => r.n, cell: ({ row }) => row.original.n },
+    ];
+    const user = userEvent.setup();
+    render(<DataTable columns={fnColumns} data={rows} getRowId={(r) => r.id} />);
+
+    const sortBtn = screen.getByRole('button', { name: /数值/ });
+    await user.click(sortBtn);
+    expect(names()).toEqual(['甲', '丙', '乙']); // 数字列 desc 优先
+    await user.click(sortBtn);
+    expect(names()).toEqual(['乙', '丙', '甲']);
+  });
+
   it('点表头排序：数值列先降序（TanStack 对数字列默认 desc 优先），再切升序', async () => {
     const user = userEvent.setup();
     render(<DataTable columns={columns} data={rows} getRowId={(r) => r.id} />);

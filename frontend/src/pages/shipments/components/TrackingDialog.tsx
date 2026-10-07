@@ -1,6 +1,9 @@
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useAtom, useAtomValue } from 'jotai';
-import { useState } from 'react';
+import { useEffect } from 'react';
+import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
+import { z } from 'zod';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -14,29 +17,38 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { tplIntegration } from '@/lib/labels';
 import { useShipmentActions } from '../actions';
-import { shipmentFiltersAtom, shipmentTrackingTargetAtom } from '../store';
+import { shipmentSubmittingAtom, shipmentTrackingTargetAtom } from '../store';
 
-/** 传单号：仅 tpl_integration_type ∈ {3pl_tracking, non_integrated} 的 posting 需要（总纲 §7.4）。 */
+const schema = z.object({
+  tracking_no: z.string().min(6, '请填写承运商单号（至少 6 位）'),
+  carrier: z.string(),
+});
+
+type TrackingForm = z.infer<typeof schema>;
+
+const EMPTY: TrackingForm = { tracking_no: '', carrier: '' };
+
+/** 传单号：只对 tracking_action = set 的行显示（判定权在后端 order.TrackingActionFor）。 */
 export function TrackingDialog() {
   const [target, setTarget] = useAtom(shipmentTrackingTargetAtom);
-  const filters = useAtomValue(shipmentFiltersAtom);
-  const { setTracking, loadShipments } = useShipmentActions();
-  const [trackingNo, setTrackingNo] = useState('');
-  const [error, setError] = useState('');
+  const submitting = useAtomValue(shipmentSubmittingAtom);
+  const { setTracking, reloadShipments } = useShipmentActions();
 
-  async function onSubmit(): Promise<void> {
+  const form = useForm<TrackingForm>({ resolver: zodResolver(schema), defaultValues: EMPTY });
+
+  // 每次打开都重置（评审路二 #1：取消不把上一条的单号带进来）
+  useEffect(() => {
+    if (target) form.reset(EMPTY);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
+  async function onSubmit(values: TrackingForm): Promise<void> {
     if (!target) return;
-    if (trackingNo.trim().length < 6) {
-      setError('请填写承运商单号');
-      return;
-    }
-    const ok = await setTracking(target.order_id, trackingNo.trim());
+    const ok = await setTracking(target.order_id, values.tracking_no.trim());
     if (ok) {
       toast.success('已回传单号');
       setTarget(null);
-      setTrackingNo('');
-      setError('');
-      void loadShipments(filters);
+      void reloadShipments();
     }
   }
 
@@ -51,17 +63,27 @@ export function TrackingDialog() {
               · 物流方式「{tplIntegration(target.tpl_integration_type)}」由卖家登记，需要回传单号。
             </DialogDescription>
           </DialogHeader>
-          <div className='space-y-2'>
-            <Label htmlFor='tracking-no'>承运商单号</Label>
-            <Input id='tracking-no' value={trackingNo} onChange={(e) => setTrackingNo(e.target.value)} />
-            {error && <p className='text-sm text-destructive'>{error}</p>}
-          </div>
-          <DialogFooter>
-            <Button variant='outline' onClick={() => setTarget(null)}>
-              取消
-            </Button>
-            <Button onClick={() => void onSubmit()}>回传</Button>
-          </DialogFooter>
+          <form className='space-y-4' onSubmit={form.handleSubmit(onSubmit)}>
+            <div className='space-y-2'>
+              <Label htmlFor='tracking-no'>承运商单号</Label>
+              <Input id='tracking-no' autoFocus {...form.register('tracking_no')} />
+              {form.formState.errors.tracking_no && (
+                <p className='text-sm text-destructive'>{form.formState.errors.tracking_no.message}</p>
+              )}
+            </div>
+            <div className='space-y-2'>
+              <Label htmlFor='tracking-carrier'>承运商（可空）</Label>
+              <Input id='tracking-carrier' {...form.register('carrier')} />
+            </div>
+            <DialogFooter>
+              <Button type='button' variant='outline' onClick={() => setTarget(null)} disabled={submitting}>
+                取消
+              </Button>
+              <Button type='submit' disabled={submitting}>
+                {submitting ? '回传中…' : '回传'}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       )}
     </Dialog>

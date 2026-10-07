@@ -11,7 +11,13 @@ export interface MockRoute {
   body: unknown;
 }
 
-export type MockRoutes = Record<string, MockRoute | ((cfg: { data?: unknown; url?: string }) => MockRoute)>;
+export interface MockRequestInfo {
+  data?: unknown;
+  params?: unknown;
+  url?: string;
+}
+
+export type MockRoutes = Record<string, MockRoute | ((cfg: MockRequestInfo) => MockRoute)>;
 
 /** 装一个假 adapter，返回卸载函数（afterEach 里调）。 */
 export function installMockAdapter(routes: MockRoutes): () => void {
@@ -19,7 +25,11 @@ export function installMockAdapter(routes: MockRoutes): () => void {
     const key = `${(config.method ?? 'get').toUpperCase()} ${config.url}`;
     const hit = routes[key];
     let route: MockRoute = { status: 404, body: { code: 1, message: `mock 未定义路由: ${key}` } };
-    if (hit) route = typeof hit === 'function' ? hit({ data: config.data, url: config.url }) : hit;
+    if (hit) {
+      route = typeof hit === 'function'
+        ? hit({ data: config.data, params: config.params, url: config.url })
+        : hit;
+    }
     const resp: AxiosResponse = {
       data: route.body,
       status: route.status ?? 200,

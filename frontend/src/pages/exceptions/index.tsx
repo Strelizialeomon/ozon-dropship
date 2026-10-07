@@ -17,17 +17,20 @@ import {
   exceptionResolveTargetAtom,
   exceptionsAtom,
   exceptionsLoadingAtom,
+  type ExceptionStatusFilter,
   exceptionsTotalAtom,
+  exceptionSubmittingAtom,
 } from './store';
 
 export default function ExceptionsPage() {
   const list = useAtomValue(exceptionsAtom);
   const total = useAtomValue(exceptionsTotalAtom);
   const loading = useAtomValue(exceptionsLoadingAtom);
+  const submitting = useAtomValue(exceptionSubmittingAtom);
   const filters = useAtomValue(exceptionFiltersAtom);
   const [resolveTarget, setResolveTarget] = useAtom(exceptionResolveTargetAtom);
   const [note, setNote] = useAtom(exceptionNoteAtom);
-  const { loadExceptions, applyFilters, changePage, resolve } = useExceptionActions();
+  const { loadExceptions, reloadExceptions, applyFilters, changePage, resolve } = useExceptionActions();
 
   useEffect(() => {
     void loadExceptions(filters);
@@ -41,7 +44,7 @@ export default function ExceptionsPage() {
       toast.success('已标记处理');
       setResolveTarget(null);
       setNote('');
-      void loadExceptions(filters);
+      void reloadExceptions();
     }
   }
 
@@ -60,14 +63,17 @@ export default function ExceptionsPage() {
       />
 
       <div className='mb-3 flex flex-wrap items-center gap-2'>
-        <Select value={filters.status || '_all'} onValueChange={(v) => applyFilters({ status: v === '_all' ? '' : v })}>
+        <Select
+          value={filters.status}
+          onValueChange={(v) => applyFilters({ status: v as ExceptionStatusFilter })}
+        >
           <SelectTrigger className='w-32'>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value='open'>未处理</SelectItem>
             <SelectItem value='resolved'>已处理</SelectItem>
-            <SelectItem value='_all'>全部</SelectItem>
+            <SelectItem value='all'>全部</SelectItem>
           </SelectContent>
         </Select>
 
@@ -106,11 +112,12 @@ export default function ExceptionsPage() {
         loading={loading}
         getRowId={(e) => e.id}
         pagination={pagination}
-        emptyText='异常池是空的，很好'
+        emptyText={filters.status === 'open' ? '异常池是空的，很好' : '没有符合条件的异常'}
         columns={[
           {
             id: 'ref',
             header: '对象',
+            accessorFn: (e) => `${e.ref_type}:${e.ref_id}`,
             cell: ({ row }) => (
               <div className='text-xs'>
                 <div>{REF_TYPE[row.original.ref_type] ?? row.original.ref_type}</div>
@@ -118,19 +125,26 @@ export default function ExceptionsPage() {
               </div>
             ),
           },
-          { id: 'code', header: '原因', cell: ({ row }) => exceptionCode(row.original.code) },
+          {
+            id: 'code',
+            header: '原因',
+            accessorFn: (e) => e.code,
+            cell: ({ row }) => exceptionCode(row.original.code),
+          },
           {
             id: 'detail',
             header: '详情',
+            accessorFn: (e) => e.detail ?? '',
             cell: ({ row }) => (
-              <span className='line-clamp-2 max-w-md text-xs' title={row.original.detail}>
-                {row.original.detail}
+              <span className='line-clamp-2 max-w-md text-xs' title={row.original.detail ?? ''}>
+                {row.original.detail ?? '—'}
               </span>
             ),
           },
           {
             id: 'status',
             header: '状态',
+            accessorFn: (e) => e.status,
             cell: ({ row }) => (
               <StatusBadge
                 spec={row.original.status === 'open'
@@ -139,10 +153,16 @@ export default function ExceptionsPage() {
               />
             ),
           },
-          { id: 'created', header: '进池时间', cell: ({ row }) => formatDateTime(row.original.created_at) },
+          {
+            id: 'created',
+            header: '进池时间',
+            accessorFn: (e) => e.created_at,
+            cell: ({ row }) => formatDateTime(row.original.created_at),
+          },
           {
             id: 'handled',
             header: '处理',
+            accessorFn: (e) => e.handled_at ?? '',
             cell: ({ row }) =>
               row.original.handled_at
                 ? (
@@ -185,7 +205,7 @@ export default function ExceptionsPage() {
         description={
           <div className='space-y-2'>
             <p>
-              {exceptionCode(resolveTarget?.code)}：{resolveTarget?.detail}
+              {exceptionCode(resolveTarget?.code)}：{resolveTarget?.detail ?? '—'}
             </p>
             <Textarea
               placeholder='处理说明（写进留痕）'
@@ -196,6 +216,7 @@ export default function ExceptionsPage() {
           </div>
         }
         confirmText='标记已处理'
+        busy={submitting}
         onConfirm={() => void onResolve()}
       />
     </div>

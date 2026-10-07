@@ -1,4 +1,4 @@
-import { useSetAtom } from 'jotai';
+import { getDefaultStore, useSetAtom } from 'jotai';
 import {
   createOfferLink as apiCreateLink,
   createSupplierOffer as apiCreateOffer,
@@ -17,12 +17,10 @@ import {
   linkFiltersAtom,
   linksAtom,
   linksLoadingAtom,
-  linksTotalAtom,
   type OfferFilters,
   offerFiltersAtom,
   offersAtom,
   offersLoadingAtom,
-  offersTotalAtom,
 } from './store';
 
 let offerSeq = 0;
@@ -30,19 +28,18 @@ let linkSeq = 0;
 
 export function useOfferActions() {
   const setList = useSetAtom(offersAtom);
-  const setTotal = useSetAtom(offersTotalAtom);
   const setLoading = useSetAtom(offersLoadingAtom);
   const setFilters = useSetAtom(offerFiltersAtom);
   const setSubmitting = useSetAtom(catalogSubmittingAtom);
 
+  /** 货源列表不分页（后端起止）：一次拿全，筛选条件透传。 */
   async function loadOffers(q: OfferFilters): Promise<void> {
     const id = ++offerSeq;
     setLoading(true);
     try {
-      const data = await listSupplierOffers(q);
+      const rows = await listSupplierOffers(q);
       if (id !== offerSeq) return;
-      setList(data.list);
-      setTotal(data.total);
+      setList(rows);
     } catch {
       // 拦截器已提示
     } finally {
@@ -50,19 +47,15 @@ export function useOfferActions() {
     }
   }
 
+  /** 用「此刻」的筛选条件重拉（增删改后刷新用）。 */
+  async function reloadOffers(): Promise<void> {
+    await loadOffers(getDefaultStore().get(offerFiltersAtom));
+  }
+
   function applyFilters(patch: Partial<OfferFilters>): void {
     let next!: OfferFilters;
     setFilters((prev) => {
-      next = { ...prev, ...patch, page: 1 };
-      return next;
-    });
-    void loadOffers(next);
-  }
-
-  function changePage(page: number): void {
-    let next!: OfferFilters;
-    setFilters((prev) => {
-      next = { ...prev, page };
+      next = { ...prev, ...patch };
       return next;
     });
     void loadOffers(next);
@@ -93,20 +86,22 @@ export function useOfferActions() {
   }
 
   async function deleteOffer(id: string): Promise<boolean> {
+    setSubmitting(true);
     try {
       await apiDeleteOffer(id);
       return true;
     } catch {
       return false;
+    } finally {
+      setSubmitting(false);
     }
   }
 
-  return { loadOffers, applyFilters, changePage, createOffer, updateOffer, deleteOffer };
+  return { loadOffers, reloadOffers, applyFilters, createOffer, updateOffer, deleteOffer };
 }
 
 export function useLinkActions() {
   const setList = useSetAtom(linksAtom);
-  const setTotal = useSetAtom(linksTotalAtom);
   const setLoading = useSetAtom(linksLoadingAtom);
   const setFilters = useSetAtom(linkFiltersAtom);
   const setSubmitting = useSetAtom(catalogSubmittingAtom);
@@ -115,10 +110,9 @@ export function useLinkActions() {
     const id = ++linkSeq;
     setLoading(true);
     try {
-      const data = await listOfferLinks(q);
+      const rows = await listOfferLinks(q);
       if (id !== linkSeq) return;
-      setList(data.list);
-      setTotal(data.total);
+      setList(rows);
     } catch {
       // 拦截器已提示
     } finally {
@@ -126,19 +120,14 @@ export function useLinkActions() {
     }
   }
 
+  async function reloadLinks(): Promise<void> {
+    await loadLinks(getDefaultStore().get(linkFiltersAtom));
+  }
+
   function applyFilters(patch: Partial<LinkFilters>): void {
     let next!: LinkFilters;
     setFilters((prev) => {
-      next = { ...prev, ...patch, page: 1 };
-      return next;
-    });
-    void loadLinks(next);
-  }
-
-  function changePage(page: number): void {
-    let next!: LinkFilters;
-    setFilters((prev) => {
-      next = { ...prev, page };
+      next = { ...prev, ...patch };
       return next;
     });
     void loadLinks(next);
@@ -156,10 +145,11 @@ export function useLinkActions() {
     }
   }
 
-  async function updateLink(id: string, req: OfferLinkReq): Promise<boolean> {
+  /** 后端 PUT 只收 priority / target_stock。 */
+  async function updateLink(id: string, body: { priority: number; target_stock: number }): Promise<boolean> {
     setSubmitting(true);
     try {
-      await apiUpdateLink(id, req);
+      await apiUpdateLink(id, body);
       return true;
     } catch {
       return false;
@@ -169,13 +159,16 @@ export function useLinkActions() {
   }
 
   async function deleteLink(id: string): Promise<boolean> {
+    setSubmitting(true);
     try {
       await apiDeleteLink(id);
       return true;
     } catch {
       return false;
+    } finally {
+      setSubmitting(false);
     }
   }
 
-  return { loadLinks, applyFilters, changePage, createLink, updateLink, deleteLink };
+  return { loadLinks, reloadLinks, applyFilters, createLink, updateLink, deleteLink };
 }

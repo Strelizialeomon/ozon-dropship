@@ -1,16 +1,15 @@
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
-import { Search } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import type { PurchaseTaskDTO } from '@/api/purchase-tasks';
+import { storeOptionsAtom, useStoreOptionsActions } from '@/atoms/storeOptions';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { DataTable, type ServerPagination } from '@/components/DataTable';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { formatDateTime, formatMoney } from '@/lib/format';
+import { formatDateTime } from '@/lib/format';
 import { channelLabel, EXECUTOR, TASK_STATUS_OPTIONS, taskStatus } from '@/lib/labels';
 import { BackfillDialog } from './components/BackfillDialog';
 import { MarkPaidDialog } from './components/MarkPaidDialog';
@@ -28,26 +27,21 @@ import {
   taskToManualTargetAtom,
 } from './store';
 
-const CHANNEL_OPTIONS = [
-  { value: 'self_use', label: '1688 自用版' },
-  { value: 'cross_border', label: '1688 跨境版' },
-  { value: 'manual', label: '人工渠道' },
-];
-
 const EXECUTOR_OPTIONS = [
   { value: 'auto', label: '自动' },
   { value: 'manual', label: '人工' },
 ];
 
-/** 行上该显示哪些动作（按执行器 × 状态推导，照总纲 §5.1 的状态机）。 */
+/** 行上该显示哪些动作（对齐后端各动作的状态校验，见 purchase/handler.go、manual.go）。 */
 function rowActions(t: PurchaseTaskDTO) {
-  const busy = ['closed'].includes(t.status);
+  const st = t.status;
   return {
-    execute: t.executor_type === 'auto' && (t.status === 'pending' || t.status === 'exception'),
-    toManual: t.executor_type === 'auto' && (t.status === 'pending' || t.status === 'exception'),
-    markPaid: t.status === 'ordered',
-    prepSheet: t.executor_type === 'manual' && !busy && t.status !== 'paid' && t.status !== 'shipped',
-    backfill: t.status === 'paid' || t.status === 'shipped' || (t.executor_type === 'manual' && t.status === 'ordered'),
+    execute: t.executor_type === 'auto' && (st === 'pending' || st === 'exception'),
+    toManual: t.executor_type === 'auto' && (st === 'pending' || st === 'exception'),
+    markPaid: st === 'ordered' || st === 'exception',
+    prepSheet: t.executor_type === 'manual'
+      && (st === 'pending' || st === 'executing' || st === 'exception' || st === 'ordered'),
+    backfill: st === 'ordered' || st === 'paid' || st === 'exception',
   };
 }
 
@@ -61,12 +55,16 @@ export default function PurchaseTasksPage() {
   const [toManualTarget, setToManualTarget] = useAtom(taskToManualTargetAtom);
   const setMarkPaidTarget = useSetAtom(taskMarkPaidTargetAtom);
   const setBackfillTarget = useSetAtom(taskBackfillTargetAtom);
-  const [keywordInput, setKeywordInput] = useState(filters.keyword);
+  const storeOptions = useAtomValue(storeOptionsAtom);
 
-  const { loadTasks, applyFilters, changePage, resetFilters } = useTaskListActions();
+  const { loadTasks, reloadTasks, applyFilters, changePage, resetFilters } = useTaskListActions();
   const { execute, toManual, openPrepSheet } = useTaskActions();
+  const { ensureStores } = useStoreOptionsActions();
+
+  const storeName = useMemo(() => new Map(storeOptions.map((s) => [s.id, s.name])), [storeOptions]);
 
   useEffect(() => {
+    void ensureStores();
     void loadTasks(filters);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -75,8 +73,8 @@ export default function PurchaseTasksPage() {
     if (!executeTarget) return;
     const ok = await execute(executeTarget.id);
     if (ok) {
-      toast.success('已发起自动下单');
-      void loadTasks(filters);
+      toast.success('已投递执行');
+      void reloadTasks();
     }
     setExecuteTarget(null);
   }
@@ -86,7 +84,7 @@ export default function PurchaseTasksPage() {
     const ok = await toManual(toManualTarget.id);
     if (ok) {
       toast.success('已转人工');
-      void loadTasks(filters);
+      void reloadTasks();
     }
     setToManualTarget(null);
   }
@@ -106,6 +104,23 @@ export default function PurchaseTasksPage() {
       />
 
       <div className='mb-3 flex flex-wrap items-center gap-2'>
+        <Select
+          value={filters.store_id || '_all'}
+          onValueChange={(v) => applyFilters({ store_id: v === '_all' ? '' : v })}
+        >
+          <SelectTrigger className='w-44'>
+            <SelectValue placeholder='全部店铺' />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value='_all'>全部店铺</SelectItem>
+            {storeOptions.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {s.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
         <Select value={filters.status || '_all'} onValueChange={(v) => applyFilters({ status: v === '_all' ? '' : v })}>
           <SelectTrigger className='w-36'>
             <SelectValue placeholder='全部状态' />
@@ -113,23 +128,6 @@ export default function PurchaseTasksPage() {
           <SelectContent>
             <SelectItem value='_all'>全部状态</SelectItem>
             {TASK_STATUS_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={o.value}>
-                {o.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={filters.channel || '_all'}
-          onValueChange={(v) => applyFilters({ channel: v === '_all' ? '' : v })}
-        >
-          <SelectTrigger className='w-36'>
-            <SelectValue placeholder='全部渠道' />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value='_all'>全部渠道</SelectItem>
-            {CHANNEL_OPTIONS.map((o) => (
               <SelectItem key={o.value} value={o.value}>
                 {o.label}
               </SelectItem>
@@ -154,18 +152,6 @@ export default function PurchaseTasksPage() {
           </SelectContent>
         </Select>
 
-        <div className='flex items-center gap-1'>
-          <Input
-            className='w-52'
-            placeholder='posting / 店铺'
-            value={keywordInput}
-            onChange={(e) => setKeywordInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyFilters({ keyword: keywordInput })}
-          />
-          <Button variant='outline' size='icon' onClick={() => applyFilters({ keyword: keywordInput })}>
-            <Search className='size-4' />
-          </Button>
-        </div>
         <Button variant='ghost' size='sm' onClick={resetFilters}>
           重置
         </Button>
@@ -181,37 +167,54 @@ export default function PurchaseTasksPage() {
           {
             id: 'posting',
             header: 'posting',
-            cell: ({ row }) => <span className='font-mono text-xs'>{row.original.posting_number}</span>,
+            accessorFn: (t) => t.payload?.posting_number ?? '',
+            cell: ({ row }) => <span className='font-mono text-xs'>{row.original.payload?.posting_number ?? '—'}</span>,
           },
-          { id: 'store', header: '店铺', cell: ({ row }) => row.original.store_name },
+          {
+            id: 'store',
+            header: '店铺',
+            accessorFn: (t) => (t.payload ? storeName.get(t.payload.store_id) ?? t.payload.store_id : ''),
+            cell: ({ row }) => {
+              const sid = row.original.payload?.store_id;
+              return sid ? storeName.get(sid) ?? sid : '—';
+            },
+          },
           {
             id: 'channel',
             header: '渠道',
+            accessorFn: (t) => t.channel,
             cell: ({ row }) => <StatusBadge spec={channelLabel(row.original.channel)} />,
           },
           {
             id: 'executor',
             header: '执行器',
+            accessorFn: (t) => t.executor_type,
             cell: ({ row }) => EXECUTOR[row.original.executor_type] ?? row.original.executor_type,
           },
-          { id: 'status', header: '状态', cell: ({ row }) => <StatusBadge spec={taskStatus(row.original.status)} /> },
-          { id: 'assignee', header: '负责人', cell: ({ row }) => row.original.assignee || '—' },
-          { id: 'deadline', header: '截止', cell: ({ row }) => formatDateTime(row.original.deadline) },
           {
-            id: 'paid',
-            header: '实付 / 单号',
-            cell: ({ row }) => {
-              const po = row.original.purchase_order;
-              if (!po) return '—';
-              return (
-                <div className='text-xs'>
-                  <div>{formatMoney(po.amount, po.currency ?? 'CNY')}</div>
-                  <div className='text-muted-foreground'>{po.platform_order_id || '—'}</div>
-                </div>
-              );
-            },
+            id: 'status',
+            header: '状态',
+            accessorFn: (t) => t.status,
+            cell: ({ row }) => <StatusBadge spec={taskStatus(row.original.status)} />,
           },
-          { id: 'created', header: '创建时间', cell: ({ row }) => formatDateTime(row.original.created_at) },
+          {
+            id: 'assignee',
+            header: '负责人',
+            accessorFn: (t) => t.assignee ?? '',
+            cell: ({ row }) => row.original.assignee || '—',
+          },
+          {
+            id: 'deadline',
+            header: '截止',
+            accessorFn: (t) => t.deadline ?? '',
+            cell: ({ row }) => formatDateTime(row.original.deadline),
+          },
+          {
+            id: 'created',
+            header: '创建时间',
+            accessorFn: (t) => t.created_at,
+            cell: ({ row }) => formatDateTime(row.original.created_at),
+          },
           {
             id: 'actions',
             header: '操作',
@@ -267,9 +270,9 @@ export default function PurchaseTasksPage() {
         onOpenChange={(open) => !open && setExecuteTarget(null)}
         title='立即执行自动下单？'
         description={`将对 ${
-          executeTarget?.posting_number ?? ''
-        } 调 1688 下单接口（S1 无免密支付，下单后停在「已下单」，需人工付款后记付款）。`}
-        confirmText='下单'
+          executeTarget?.payload?.posting_number ?? executeTarget?.id ?? ''
+        } 投递自动执行（S1 无免密支付，下单后停在「已下单」，需人工付款后记付款）。`}
+        confirmText='执行'
         busy={submitting}
         onConfirm={() => void onExecute()}
       />

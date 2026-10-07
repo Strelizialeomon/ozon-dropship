@@ -55,8 +55,9 @@ http.interceptors.response.use(
         resp.data = shell.data; // 解包：调用方拿到的就是业务 data
         return resp;
       }
-      // HTTP 200 但业务失败
-      const err = new ApiError(shell.code, shell.error || shell.message || '请求失败', shell.data);
+      // HTTP 200 但业务失败。提示优先用 message（后端给操作员的中文话术），
+      // error 常常是 Go 侧的原始错误串，只作兜底。
+      const err = new ApiError(shell.code, shell.message || shell.error || '请求失败', shell.data);
       if (resp.config.url !== LOGIN_PATH) toast.error(err.message);
       throw err;
     }
@@ -70,7 +71,8 @@ http.interceptors.response.use(
       unauthorizedListener?.();
       throw new ApiError(401, shell?.message || '未登录或会话已失效');
     }
-    const msg = shell?.error || shell?.message || error.message || '网络异常，请稍后重试';
+    // message 是给操作员的（中文）；error 兜底（可能是原始错误串或 Go validator 英文）。
+    const msg = shell?.message || shell?.error || error.message || '网络异常，请稍后重试';
     const apiErr = new ApiError(shell?.code ?? status ?? 1, msg, shell?.data);
     // 登录页自己显示行内错误，不弹全局提示。
     if (error.config?.url !== LOGIN_PATH) toast.error(msg);

@@ -36,7 +36,13 @@ export function ConfirmDialog({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{title}</AlertDialogTitle>
-            {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
+            {description && (
+              // asChild + div：AlertDialogDescription 默认渲染 <p>，描述里可能带 <div>/<textarea>
+              // （比如异常处理要填备注）——嵌块级元素会触发 DOM 嵌套违规（真后端冒烟抓到）。
+              <AlertDialogDescription asChild>
+                <div className='text-muted-foreground text-sm'>{description}</div>
+              </AlertDialogDescription>
+            )}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>

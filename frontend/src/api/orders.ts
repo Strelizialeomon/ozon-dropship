@@ -1,70 +1,87 @@
-// 订单工作台（S1-D 的接口清单：/api/orders —— 列表 / 筛选 / 详情 / 批量）。
-//
-// ⚠️ D 尚未合并：本文件按子 spec spec-s1d-fulfillment §3 + 总纲 §6 字段手写契约。
-// D 落地后以后端 Go handler 为准核对一遍，不符以内端为准并同步此文件（总纲 §4.1：
-// 接口以后端 Go 代码为准，前端手写调用）。字段名与总纲 §6 保持一致。
+// 订单工作台接口（后端已实现：backend/internal/order/handler.go、model.go）。
+// 总纲 §4.1：接口以后端 Go 代码为准、前端手写——本文件字段逐个照 Go struct 的 json tag。
 import { request } from './client';
 
-export interface OrderItemDTO {
-  id: string;
-  ozon_offer_id: string;
-  qty: number;
-  price: string; // DECIMAL 以字符串给到前端
-  currency: string;
-  offer_link_id: string | null;
-}
-
+/** 订单行（orders 表；posting 粒度）。 */
 export interface OrderDTO {
   id: string;
   store_id: string;
-  store_name: string;
   posting_number: string;
   order_number: string;
   parent_posting_number: string | null;
   status: string; // 总纲 §5.2 内部状态机
   ozon_status: string;
   ozon_substatus: string | null;
-  tpl_integration_type: string;
+  tpl_integration_type: string | null;
   ship_deadline: string | null;
   relay_point_id: string | null;
-  relay_point_name?: string | null;
+  total_amount: string; // decimal 走字符串
   currency: string;
-  total_amount: string | null; // 单内商品合计（明细之和）
-  items: OrderItemDTO[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 订单行明细（order_items 表；详情接口带）。 */
+export interface OrderItemDTO {
+  id: string;
+  order_id: string;
+  ozon_offer_id: string;
+  qty: number;
+  price: string;
+  currency: string;
+  offer_link_id: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface OrderListQuery {
+  store_id?: string;
+  status?: string; // 可逗号分隔多值（后端 splitCSV）
+  ozon_status?: string;
+  tpl_integration_type?: string;
+  keyword?: string;
+  from?: string; // RFC3339
+  to?: string;
   page: number;
   page_size: number;
-  store_id?: string;
-  status?: string;
-  keyword?: string; // posting_number / order_number 模糊
 }
 
 export interface OrderListData {
   total: number;
-  list: OrderDTO[];
+  items: OrderDTO[];
 }
 
-/** 批量动作：给选中的订单生成采购任务（总纲 §5.1；已在执行中的跳过）。 */
-export type OrderBatchAction = 'create_purchase_task';
+/** GET /api/orders/:id → 订单 + 商品行。 */
+export interface OrderDetailData {
+  order: OrderDTO;
+  items: OrderItemDTO[];
+}
+
+/** 批量动作（后端 oneof）；每条独立成败，不整批回滚。 */
+export type OrderBatchAction = 'plan_purchase' | 'set_relay_point';
+
+export interface OrderBatchFailure {
+  id: string;
+  error: string;
+}
 
 export interface OrderBatchResult {
-  acted: number;
-  skipped: number; // 平台未放行 / 已有任务等
-  messages?: string[];
+  succeeded: number;
+  failed: OrderBatchFailure[];
 }
 
 export function listOrders(q: OrderListQuery): Promise<OrderListData> {
   return request<OrderListData>({ method: 'GET', url: '/api/orders', params: q });
 }
 
-export function getOrder(id: string): Promise<OrderDTO> {
-  return request<OrderDTO>({ method: 'GET', url: `/api/orders/${id}` });
+export function getOrder(id: string): Promise<OrderDetailData> {
+  return request<OrderDetailData>({ method: 'GET', url: `/api/orders/${id}` });
 }
 
-export function batchOrders(ids: string[], action: OrderBatchAction): Promise<OrderBatchResult> {
-  return request<OrderBatchResult>({ method: 'POST', url: '/api/orders/batch', data: { ids, action } });
+export function batchOrders(ids: string[], action: OrderBatchAction, relayPointId?: string): Promise<OrderBatchResult> {
+  return request<OrderBatchResult>({
+    method: 'POST',
+    url: '/api/orders/batch',
+    data: { ids, action, relay_point_id: relayPointId ?? '' },
+  });
 }
