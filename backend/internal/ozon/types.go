@@ -39,7 +39,7 @@ func (t Time) IsZero() bool { return t.Time.IsZero() }
 
 // TplIntegrationType 取值（官方现行文档原文；S1-D 据此判定是否回传单号，总纲 §7.4）。
 //
-// ⚠️ 注意官方原文把混合方案拼作 `hybryd`；总纲里写作 `hybrid`，实解析按官方。
+// ⚠️ 注意官方原文把混合方案拼作 `hybryd`（总纲 §7.4 已同步为该拼写）；实解析按官方值。
 const (
 	TplIntegrationOzon          = "ozon"           // Ozon 自有配送：单号由 Ozon 生成，只读不传
 	TplIntegrationAggregator    = "aggregator"     // 外部承运商、Ozon 登记订单：同上

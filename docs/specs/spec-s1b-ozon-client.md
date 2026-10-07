@@ -1,7 +1,7 @@
 # spec-s1b-ozon-client —— S1-B Ozon 客户端（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-B**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: [#7](https://github.com/Strelizialeomon/ozon-dropship/issues/7) ｜ 状态：v1.0（2026-10-07）｜ 发布序：**第 2 批**，S1-A 合并后开工；与 C、D、F 并行
+> Issue: [#7](https://github.com/Strelizialeomon/ozon-dropship/issues/7) ｜ 状态：v1.1（2026-10-07：实施期修正——混合方案拼写按官方原文改为 `hybryd`，见 §8）｜ 发布序：**第 2 批**，S1-A 合并后开工；与 C、D、F 并行
 > 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
 
 ## 1. 管什么 / 不管什么
@@ -47,7 +47,7 @@
 ## 5. 验收
 
 - [ ] 方法清单里每个方法都有基于录制响应的单测，不连真实店也能跑
-- [ ] 能解析出 S1-D 要用的字段：`status`、`substatus`、`tpl_integration_type`（`ozon` / `aggregator` / `3pl_tracking` / `non_integrated` / `hybrid`）、`shipment_date`、`parent_posting_number`
+- [ ] 能解析出 S1-D 要用的字段：`status`、`substatus`、`tpl_integration_type`（`ozon` / `aggregator` / `3pl_tracking` / `non_integrated` / `hybryd`）、`shipment_date`、`parent_posting_number`
 - [ ] 模拟 429 + `Retry-After`，经限流器等待后重试成功
 - [ ] 真实店冒烟：`ListPostings`、`GetPosting`、`GetRoles` 成功
 - [ ] 两项开工实测结论已贴父 issue
@@ -69,3 +69,9 @@ PR #4 重审（owner 2026-10-07 点选「改」）的处置：
 | # | 严重度 | 发现 | 处置 |
 |---|---|---|---|
 | 4-13 | 轻微 | FBP 拉单无波次归属 | 改：归 S2（总纲 §12.2 / §9·S2 / §13.1 同步）；本份「不管」列明 FBP 拉单属后续波次 |
+
+PR #14 实施期修正（owner 2026-10-07 点选「改旧 spec」）：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 5-1 | 低 | 混合方案拼写 `hybrid` 与官方原文 `hybryd` 不符（实施对照 swagger 发现） | 改：§5 验收按官方原文改 `hybryd`；同步总纲 §7.4、S1-D §4 |
