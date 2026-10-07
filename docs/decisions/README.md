@@ -32,6 +32,7 @@
 | [ADR-20261007-go-package-deps](2026-10-07-go-package-deps.md) | 已被取代 | Go 包依赖按官方规矩：可直接 import、只许单向、禁循环；接口放使用方（由 v2 取代） |
 | [ADR-20261007-go-package-deps-v2](2026-10-07-go-package-deps-v2.md) | 生效中 | 在 v1 基础上补一条 `shipment` → `purchase` |
 | [ADR-20261007-handover-s2-first](2026-10-07-handover-s2-first.md) | 生效中 | 接手人是非技术 owner；接手后先推 S2 开发，不先上线 |
+| [ADR-20261007-open-source](2026-10-07-open-source.md) | 生效中 | 项目以 AGPL-3.0 开源，全仓（含文档与 issue）公开 |
 
 ## 本仓落点
 
