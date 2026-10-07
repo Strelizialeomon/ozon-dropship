@@ -1,0 +1,35 @@
+# 履约中台 Go 程序（HTTP 服务 + asynq worker 同进程）
+# 安装：见 deploy/install.md §8。契约（与 S1-A 对表，见 deploy/README.md）：
+#   - 二进制 /opt/fulfillment-hub/api（由 backend 的 ./cmd/api 构建）
+#   - 工作目录 /opt/fulfillment-hub（配置在 config/config.yaml）
+#   - 监听 127.0.0.1:8080，TLS 由 Caddy 终结
+#   - 主密钥经 systemd 加密凭据注入，进不了环境变量与进程参数（验收项之一）
+
+[Unit]
+Description=Fulfillment Hub API（履约中台后端）
+After=network-online.target mysql.service redis-server.service
+Wants=network-online.target
+# 不用 Requires=：MySQL / Redis 本机升级重启时不连带把应用拉停；
+# 未就绪期间由应用自身重试（队列有补投扫描兜底，总纲 §5.5）。
+
+[Service]
+Type=simple
+User=hub
+Group=hub
+WorkingDirectory=/opt/fulfillment-hub
+ExecStart=/opt/fulfillment-hub/api
+# 主密钥：内容为 32 字节随机值，用 systemd-creds 加密生成（见 install.md §6）；
+# 名必须与 systemd-creds encrypt --name= 一致，否则加载失败。
+LoadCredentialEncrypted=hub-vault-master-key
+Restart=on-failure
+RestartSec=3
+
+# 进程加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/fulfillment-hub
+
+[Install]
+WantedBy=multi-user.target

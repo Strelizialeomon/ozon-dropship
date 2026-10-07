@@ -1,0 +1,11 @@
+# 每日备份（oneshot）——由 fulfillment-hub-backup.timer 触发，也可手动：
+#   systemctl start fulfillment-hub-backup && journalctl -u fulfillment-hub-backup -n 50
+# 脚本与配置见 deploy/backup/；安装见 install.md §11。
+# 以 root 跑：需要读 /etc/fulfillment-hub/backup.cnf（0600）与 root 的 ssh key / rclone 配置。
+
+[Unit]
+Description=履约中台每日备份（mysqldump + binlog 外送）
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hub-backup

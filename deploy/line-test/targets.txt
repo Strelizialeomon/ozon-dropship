@@ -1,0 +1,5 @@
+# 探测目标（每行：标签<空白>URL[<空白>METHOD]；# 开头是注释）
+# 默认两条 = 已实测过的只读端点：无鉴权也会答话（401 / 400），4xx 记「可达」，够测线路；
+# 配了 auth.env 后 Ozon 那条会带鉴权头，答 200 说明鉴权链路也通。
+ozon-roles	https://api-seller.ozon.ru/v1/roles	POST
+alibaba-gw	https://gw.open.1688.com/openapi/param2/1/system/currentTime/	GET

@@ -1,0 +1,68 @@
+# 恢复演练 —— 恢复到指定时刻
+
+> 验收第 4 条要跑的演练。规则（ADR）：每月演练一次；恢复链 = 每日全量 dump + binlog（两端各留 30 天）。
+> binlog 回放要「干净可复现」，演练一律在**演练库或演练机**上做，别碰生产库。
+
+## 0. 恢复链与前提
+
+| 件 | 在哪 | 干什么 |
+|---|---|---|
+| `db-<时间戳>.sql.gz` + `.sha256` | 备份机 / 对象存储的 `db/` | 某天 03:30 的全量 |
+| `binlog.0000xx` 文件 | 备份机的 `binlog/` | 全量之后、到目标时刻之间的每次写入 |
+| 主密钥（base64 那串） | **密码管理器（离机）** | 解数据库里的凭据密文；丢了就只能全店重新录入密钥（见 §4） |
+
+先确认要恢复到的**目标时刻 T**（比如「昨天 12:00」），再挑 T 之前最近的一次全量。
+
+## 1. 全量落库
+
+```bash
+# 演练机上（或生产机的演练库实例），确认 dump 没坏：
+sha256sum -c db-20261007-0330.sql.gz.sha256
+# 校验通过后恢复（dump 用 --databases 导出，自带 CREATE DATABASE）：
+zcat db-20261007-0330.sql.gz | mysql
+```
+
+## 2. 从 dump 头部取 binlog 坐标
+
+```bash
+zcat db-20261007-0330.sql.gz | head -80 | grep -m1 'CHANGE REPLICATION SOURCE'
+# 形如：-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='binlog.000123', SOURCE_LOG_POS=456;
+# 记录：文件 binlog.000123，位置 456。
+```
+
+## 3. 回放 binlog 到 T
+
+把 `binlog.000123` 起、到 T 所在的那个文件为止，按顺序列给 mysqlbinlog
+（`--start-position` 只作用于第一个文件；`--stop-datetime` 按**运行 mysqlbinlog 那台机器的本地时区**解释）：
+
+```bash
+mysqlbinlog --start-position=456 \
+  --stop-datetime='2026-10-07 12:00:00' \
+  ./binlog/binlog.000123 ./binlog/binlog.000124 ./binlog/binlog.000125 | mysql
+```
+
+演练验收：查一眼数据确实停在 T，而不是「脚本没报错就算过」——
+
+```bash
+mysql -e "SELECT MAX(created_at) FROM fulfillment_hub.orders; SELECT MAX(at) FROM fulfillment_hub.audit_logs;"
+# 结果应 ≤ T；再抽查一两条 T 前后已知变化的数据，对得上才算过。
+```
+
+## 4. 灾难恢复（换机器）：别漏了主密钥
+
+systemd 加密凭据**绑定生成它的那台机器**（TPM / 主机密钥），机器没了就解不开。
+所以「整个恢复」= 三件事：
+
+1. 新机器照 `install.md` 装到 §6 之前；
+2. 从密码管理器拿出主密钥那串 base64 → `echo '<那串>' | base64 -d > /root/hub-master-key.plain` →
+   在新机器上重新跑 `systemd-creds encrypt`（命令见 install.md §6）——**不需要**旧机器上的任何东西；
+3. 按 §1–§3 恢复 DB，启动服务，验证店里已存的凭据能正常解密（操作台看一眼凭据尾号即可）。
+
+> 主密钥离机备份是硬要求：只备份数据库、不备份主密钥，恢复出来也解不开凭据。
+> 建议每次轮换主密钥时，顺手把新值更新进密码管理器。
+
+## 5. 边界（如实标）
+
+- **可恢复窗口 = 最近 30 天**（全量与 binlog 都保留 30 天，ADR 口径）。更早只能恢复到某次全量的时点，中间的空洞补不回来。
+- 回放期间如果有人在用旧库，坐标会漂——演练和真恢复都应在「不再写入」的库上做（生产真恢复时先停服务）。
+- 本文件只覆盖 MySQL。Redis 里是任务队列与会话（总纲 §6），丢了由补投扫描和重新登录兜底，不进本演练。
