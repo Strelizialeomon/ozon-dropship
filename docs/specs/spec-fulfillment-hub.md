@@ -1,7 +1,7 @@
 # spec-fulfillment-hub —— Ozon × 中国货源 · 履约中台（总 spec / 总纲）
 
 > Issue: 待开（本 spec 合并后按波次开实施 issue，届时回填号）
-> 状态：**v1.3**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR；PR #4 重审发现已处置，见 §14 第 2 次）
+> 状态：**v1.4**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR；PR #4 重审发现已处置，见 §14 第 2 次；v1.4 实施期修正与 PR #14 重审处置——拼写改 `hybryd`、`/ship/package` 语义注、面单接口注两步流程（§7.1 / §7.4），见 §14 第 3 次）
 > **设计权威 = 本文（总纲）**。S1 拆成 6 份子 spec（拆分地图见 §12.3；2026-10-07 owner 拍板，取代同日较早的「不拆子 spec」）；子 spec 只写落地、指向本文，与本文冲突时以本文为准。S2–S4 轮到时再定拆法。
 > 立项日期：2026-10-07 ｜ 需求方：owner
 > 长期决定见 §4.1 所列生效 ADR（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
@@ -325,11 +325,11 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 | 拉单（FBP） | `/v1/posting/fbp/list`、`/v1/posting/fbp/get` |
 | 推送配置 | 后台「设置 → 通知」填地址，或 `/v1/notification/*`（beta，可脚本化配 10+ 店） |
 | 密钥信息 | `/v1/roles`（角色、可调方法、到期时间） |
-| 备货（确认发货） | `/v4/posting/fbs/ship`、`/v4/posting/fbs/ship/package`；返回后复核 `substatus` |
+| 备货（确认发货） | `/v4/posting/fbs/ship`（多包裹用请求里的 `packages` 数组）；`/v4/posting/fbs/ship/package` 是「部分组装」（拆分已有寄件），S1 不用；返回后复核 `substatus` |
 | 拆单 | `/v1/posting/fbs/split` |
 | 传单号 | `/v2/fbs/posting/tracking-number/set`——**仅当** `tpl_integration_type` 为 `3pl_tracking` / `non_integrated` 时调（§7.4）；自送轨迹 `/v2/fbs/posting/delivering` → `/last-mile` → `/delivered` |
 | 发运单（官方物流头程） | `/v1/carriage/create` → `/v1/carriage/pass/create` → `/v1/carriage/approve`【未验】 |
-| 面单 | `/v2/posting/fbs/package-label`（同步 PDF） |
+| 面单 | 旧（**官方公告 2026-11-02 关停**，仅兼容）：`/v2/posting/fbs/package-label`（同步 PDF）；新两步：`/v3/posting/fbs/package-label/create`（拿 `task_id`）→ `/v2/posting/fbs/package-label/get`（拿 `file_url`） |
 | 库存 | `/v2/products/stocks`（以官方现行版为准） |
 | 取消 | `/v2/posting/fbs/cancel` |
 | 退货 | `/v1/returns/list`；rFBS：`/v2/returns/rfbs/list`、`/v1/returns/rfbs/action/set` |
@@ -360,7 +360,8 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
   - **国际段**（中转点 → 买家）：看 posting 的 `tpl_integration_type`（取值定义按官方原文）【官方】：
     - `ozon`（Ozon 自有配送）/ `aggregator`（外部承运商，**由 Ozon 登记订单**）：单号由 Ozon 生成（合作物流备货后约 30 分钟出单号与面单），**我们只读、不传**；
     - `3pl_tracking`（外部承运商，**由卖家登记订单**）/ `non_integrated`（卖家自行配送）：由我们调接口传承运商单号；自行配送还要报 delivering / last-mile / delivered 三段；
-    - `hybrid`（俄罗斯邮政混合方案）：本项目暂不涉及，遇到进异常池。
+    - `hybryd`（俄罗斯邮政混合方案，官方原文拼写如此）：本项目暂不涉及，遇到进异常池。
+      注：官方文档同一字段两种拼写并存——posting 体系（本节的判定依据）写 `hybryd`；delivery-method 体系的同名字段写 `hybrid` 且无 `ozon` 档（2026-10-07 PR #14 重审核对）。
 - 优先走 **Ozon 合作物流 / 官方物流**（轨迹自动回传）；自选承运商（如 CDEK，有官方 API【官方】）仅作备选。
 - 中国卖家 FBS 头程走「发运单」流程（2026-06-11 起，【第三方】口径），接口对应关系【未验】——S1 用真实店确认。
 
@@ -574,3 +575,12 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 | 4-13 | 轻微 | FBP 拉单无波次归属（B 方法清单、§9·S2 都没有） | 改：归 S2（§12.2 / §9·S2 / §13.1 / 子 spec B 同步） |
 | 4-14 | 轻微 | 两处「可按维度调」无字段承载 | 改：§6 补 `stores.ship_early`、`supplier_offers.price_alert_threshold` |
 | 4-15 | 轻微 | Caddy 指向的前端产物目录没写死 | 改：定 `frontend/dist`（子 spec E / F 同步） |
+
+**第 3 次：实施期修正 + PR #14 重审处置（owner 2026-10-07 点选「改旧 spec」「全改」「两套都实现」）**，来自 S1-B（#7）实施与重审时对照官方现行 swagger（2026-10-07 快照）：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 5-1 | 低 | `tpl_integration_type` 混合方案拼写：本 spec 作 `hybrid`，官方原文为 `hybryd` | 改：§7.4 按官方原文改为 `hybryd`；同步 S1-B §5 验收、S1-D §4 验收两处引用；`backend/migrations` 列注释仍为 `hybrid`（S1-A 已合并产物，注释性文本，未随本次同步） |
+| 5-2 | 低 | §7.1 把 `/ship/package` 与 `/ship` 并列，未注明官方语义是「部分组装」且 S1 不实现（PR #14 重审·路一 5） | 改：§7.1 备货行注明两者语义与取舍 |
+| 5-3 | 中 | 面单接口 `/v2/posting/fbs/package-label` 官方公告 2026-11-02 关停，替代为 create→get 两步流程（PR #14 重审·路二 #2） | 改：§7.1 面单行注明期限与替代流程；S1-B 实施两套并存（owner 点「两套都实现」） |
+| 5-4 | 低 | 官方 `tpl_integration_type` 两种拼写并存（posting 系 `hybryd` / delivery-method 系 `hybrid`），§7.4 原断言口径过宽（PR #14 重审·路一 3） | 改：§7.4 加注 |

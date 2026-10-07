@@ -1,7 +1,7 @@
 # spec-s1d-fulfillment —— S1-D 履约编排（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-D**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
+> Issue: 待开 ｜ 状态：v1.0（2026-10-07；2026-10-07 拼写同步：`hybrid` → `hybryd`，随 S1-B 实施修正，见总纲 §14 第 3 次）｜ 发布序：**第 2 批开发**，S1-A 合并后开工；与 B、C 并行开发，**须在 B、C 之后合并**
 > 跨份验收与协作声明：S1 父 issue（待开）
 
 ## 1. 管什么 / 不管什么
@@ -51,7 +51,7 @@
 - [ ] 采购：自动 / 人工两种执行器；新商家首单自动转人工；模拟「下单成功后崩溃」，重启后不重复下单；自动任务下单成功停在 `ordered`、「记已付款」后推进并回填
 - [ ] 备料单：收货地址 = 中转点、备注含 `posting_number`、无买家个人信息；回填格式校验生效
 - [ ] 中转：两类中转点的状态推进；备货返回成功但 `substatus = ship_failed` 时进异常池
-- [ ] 传单号：`tpl_integration_type` 五个取值各有单测（`ozon` / `aggregator` 不传；`3pl_tracking` / `non_integrated` 传；`hybrid` 进异常池）
+- [ ] 传单号：`tpl_integration_type` 五个取值各有单测（`ozon` / `aggregator` 不传；`3pl_tracking` / `non_integrated` 传；`hybryd` 进异常池）
 - [ ] 异常池：S1 各类异常能写入 `exceptions`、能手动处理、留审计
 - [ ] 接口清单里每个接口都有 handler 测试
 
