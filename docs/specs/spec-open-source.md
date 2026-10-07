@@ -1,7 +1,7 @@
 # spec-open-source —— 开源改造（独立 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」）。本文是**独立需求**，不属 S1 六份子 spec；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开（本 spec 合并后开实施 issue，届时回填号）｜ 状态：v1.1（2026-10-07：PR #25 轻审处置——修订 5 条发现，见 §7）
+> Issue: [#27](https://github.com/Strelizialeomon/ozon-dropship/issues/27)（本份的实施单）｜ 状态：v1.2（2026-10-07：PR #28 轻审处置——修订 M1 与 L2/L4、回填实施单号，见 §7）
 > 发布序：随时可开；**「翻公开」是最后一步——实施 PR 合并后、owner 单独点头才执行**。
 > 跨份验收与协作声明：无（独立需求）；与交接线（已落地：PR #24）共用 `README.md`，衔接规则见 §1。
 > 长期决定见 [ADR-20261007-open-source](../decisions/2026-10-07-open-source.md)（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
@@ -150,3 +150,16 @@ AGPL-3.0 官方全文（gnu.org 原件，逐字不改、不删「How to Apply」
 | 5 | 低 | §6 自定细节未回列 4 条 agent 自定口径 | 改：回列（授权声明 / 一页以内 / 尽力而为 / 英文摘要 2–3 行） |
 
 审核结论原文（未删减）见 [PR #25 评论](https://github.com/Strelizialeomon/ozon-dropship/pull/25#issuecomment-6038207822)。
+
+**第 2 次**（PR #28 闸 · 轻审 · 2026-10-07）：1 个只读审核 agent 出 6 条发现（1 中 / 5 低），owner 点「全改」（低 1/3 属计划内 / 既定取舍，不改）。逐条处置：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| M1 | 中 | CONTRIBUTING 建表路径缺 `CREATE DATABASE`、DSN 未提示同步改——干净机器断在第一步 | 改：补建库一步 + DSN 提示；注明无 AutoMigrate、两步都要有 |
+| L2 | 低 | 「测试不需要外部服务」属实，但未提 build tag 集成测试 | 改：补一行 + 链 `backend/ARCHITECTURE.md` |
+| L4 | 低 | 环境表漏 goose / golangci-lint；给的是生产向安装法 | 改：环境表补工具行（含本机安装法）；§7 注「生产环境」 |
+| L5 | 低 | spec 头部实施单号未回填 | 改：回填 #27（本条即 L5 的落地） |
+| L1 | 低 | README 宣称已开源、仓库仍 PRIVATE | 不改：计划内过渡态（§3.7 翻公开为最后一步） |
+| L3 | 低 | `.claude/` 被根 `.gitignore` 挡（共享配置需 `-f`） | 不改：既定取舍（§3.5 点名要这条） |
+
+审核结论原文（未删减）见 [PR #28 评论](https://github.com/Strelizialeomon/ozon-dropship/pull/28#issuecomment-6039167665)。
