@@ -4,6 +4,7 @@ package purchase
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ func (f *fakeBuyer) CreateOrder(_ context.Context, req CreateOrderRequest) (*Buy
 		Amount:          decimal.RequireFromString("12.34"),
 		Currency:        "CNY",
 		Remark:          req.Remark,
+		OutOrderID:      req.OutOrderID,
 		CreatedAt:       time.Now().UTC(),
 	}
 	if !strings.Contains(req.Remark, "-") && req.Remark == "" {
@@ -385,7 +387,8 @@ func TestExecuteAutoAndCrashRecovery(t *testing.T) {
 	// 1688 那边已经有单了（备注里带 posting_number）。
 	env.buyer.placed = append(env.buyer.placed, BuyerOrder{
 		PlatformOrderID: "PO-CRASH", Amount: decimal.RequireFromString("12.34"),
-		Currency: "CNY", Remark: TradeRemark("exec-crash-1", task2.ID), CreatedAt: time.Now().UTC(),
+		Currency: "CNY", Remark: TradeRemark("exec-crash-1", task2.ID),
+		OutOrderID: TradeRemark("exec-crash-1", task2.ID), CreatedAt: time.Now().UTC(),
 	})
 	callsBefore := env.buyer.createCalls
 
@@ -840,5 +843,67 @@ func TestLateRecordDoesNotRegress(t *testing.T) {
 	po, _ := env.repo.PurchaseOrderByTask(ctx, task.ID)
 	if po.PlatformOrderID != "MANUAL123456" {
 		t.Fatalf("人工填的平台单号被盖掉了：%s", po.PlatformOrderID)
+	}
+}
+
+// 轻审 #1（严重）+ owner 拍板：核对不到「那张单」但载荷里记着已尝试下单 → 不重复下单，转异常池。
+func TestUnconfirmedOrderGoesToExceptionInsteadOfReordering(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "unconfirmed-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	taskID := tasks[0].ID
+	task, _ := env.repo.TaskByID(ctx, taskID)
+
+	// 模拟「上一次已经调过下单接口」（崩溃/回包丢失），但 1688 侧核对不到那张单。
+	attempted := time.Now().UTC().Add(-10 * time.Minute)
+	pay, _ := task.DecodePayload()
+	pay.OrderAttemptedAt = &attempted
+	raw, _ := json.Marshal(pay)
+	if err := env.repo.UpdateFields(ctx, taskID, map[string]any{"payload": raw}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.svc.Execute(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if env.buyer.createCalls != 0 {
+		t.Fatalf("核对不到时绝不该再下单（会重复花钱），实际下单 %d 次", env.buyer.createCalls)
+	}
+	got, _ := env.repo.TaskByID(ctx, taskID)
+	if got.Status != StatusException {
+		t.Fatalf("应转异常池，实际 %s", got.Status)
+	}
+	rows := env.openExceptions(t, taskID)
+	if len(rows) != 1 || rows[0].Code != order.CodeAlibabaOrderFailed {
+		t.Fatalf("应记 1 条 alibaba_order_failed 异常，实际 %+v", rows)
+	}
+}
+
+// 轻审 #6：部分下单失败（ErrOrderIncomplete）不可重试，直接进异常池（重试会被核对路径洗成已下单）。
+func TestPartialOrderFailureGoesToExceptionWithoutRetry(t *testing.T) {
+	env := newPurchaseEnv(t)
+	ctx := context.Background()
+
+	o := env.seedOrder(t, "partial-1", "SKU-A", true)
+	if err := env.svc.PlanOrder(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := env.repo.TasksByOrder(ctx, o.ID)
+	env.buyer.createErr = fmt.Errorf("%w：订单 999 部分商品未成功", ErrOrderIncomplete)
+
+	if err := env.svc.Execute(ctx, tasks[0].ID); err != nil {
+		t.Fatalf("不可重试的失败不该把错误抛回去（会被 asynq 反复重试）: %v", err)
+	}
+	got, _ := env.repo.TaskByID(ctx, tasks[0].ID)
+	if got.Status != StatusException {
+		t.Fatalf("应直接进异常池，实际 %s", got.Status)
+	}
+	if rows := env.openExceptions(t, tasks[0].ID); len(rows) != 1 {
+		t.Fatalf("应记 1 条异常，实际 %+v", rows)
 	}
 }

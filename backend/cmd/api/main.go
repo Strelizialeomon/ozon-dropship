@@ -141,21 +141,23 @@ func main() {
 	exceptions.SetNotifier(notifier)
 	orderRepo := order.NewRepo(db.DB)
 	relayRepo := order.NewRelayRepo(db.DB)
-	// TODO(S1-B 合并后)：把 ozon 客户端适配成 order.PostingSourceFactory 接进第 5 参，
-	//   拉单任务当前会明确报「Ozon 客户端未接入」；人工流程与其余接口不受影响。
-	orderSvc := order.NewService(orderRepo, exceptions, shopRepo, credSvc, nil, q)
+	// 客户端适配见 cmd/api/fulfillment.go（组合根里同时认识两边）。
+	orderSvc := order.NewService(orderRepo, exceptions, shopRepo, credSvc, ozonPostingSourceFactory(limiter), q)
 	orderHandler := order.NewHandler(orderRepo, orderSvc, auditRec)
 	exceptionHandler := order.NewExceptionHandler(exceptions, auditRec)
 
-	// TODO(S1-C 合并后)：把 alibaba 客户端适配成 purchase.BuyerClientFactory 接进第 6 参，
-	//   自动执行器当前会报「1688 客户端未接入」（可转人工）。
+	// 1688 客户端全进程共用一个（内部有 token 缓存与限流桶）。
+	alibabaClient, err := newAlibabaClient(cfg, limiter, credSvc)
+	if err != nil {
+		logger.Fatalf("[main] 1688 客户端构造失败: %v", err)
+	}
 	purchaseRepo := purchase.NewRepo(db.DB)
-	purchaseSvc := purchase.NewService(purchaseRepo, orderSvc, relayRepo, catalogRepo, credSvc, nil, auditRec, q)
+	purchaseSvc := purchase.NewService(purchaseRepo, orderSvc, relayRepo, catalogRepo, credSvc,
+		alibabaBuyerFactory(alibabaClient), auditRec, q)
 	purchaseHandler := purchase.NewHandler(purchaseRepo, purchaseSvc, auditRec)
 
-	// TODO(S1-B 合并后)：把 ozon 客户端适配成 shipment.FulfillerFactory 接进第 5 参。
 	shipmentRepo := shipment.NewRepo(db.DB)
-	shipmentSvc := shipment.NewService(shipmentRepo, orderSvc, purchaseRepo, credSvc, nil, auditRec)
+	shipmentSvc := shipment.NewService(shipmentRepo, orderSvc, purchaseRepo, credSvc, ozonFulfillerFactory(limiter), auditRec)
 	shipmentHandler := shipment.NewHandler(shipmentSvc, relayRepo, auditRec)
 
 	// S1-D 任务处理器与补投规则（总纲 §5.5）。
