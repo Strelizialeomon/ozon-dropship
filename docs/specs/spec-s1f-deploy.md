@@ -1,8 +1,9 @@
 # spec-s1f-deploy —— S1-F 部署（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-F**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：随时可开；**须在 A、E 之后合并**（验收要 S1-A 的二进制与 S1-E 的构建产物）
-> 跨份验收与协作声明：S1 父 issue（待开）
+> Issue: [#11](https://github.com/Strelizialeomon/ozon-dropship/issues/11) ｜ 状态：v1.0（2026-10-07）｜ 发布序：随时可开；**须在 A、E 之后合并**（验收要 S1-A 的二进制与 S1-E 的构建产物）
+> 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
+> 实施状态：已合并（PR #12），待上线
 
 ## 1. 管什么 / 不管什么
 

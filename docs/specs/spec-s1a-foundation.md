@@ -3,6 +3,7 @@
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-A**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
 > Issue: [#6](https://github.com/Strelizialeomon/ozon-dropship/issues/6) ｜ 状态：v1.1（2026-10-07：PR #13 重审处置——新增「登录失败限速」机制、自定细节补参数，见 §7 第 2 次）｜ 发布序：**第 1 批，硬前置**（B、C、D、E 都等它合并后开工；F 随时可开）
 > 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
+> 实施状态：已合并（PR #13），待上线
 
 ## 1. 管什么 / 不管什么
 

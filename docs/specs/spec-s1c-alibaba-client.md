@@ -3,6 +3,7 @@
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-C**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
 > Issue: [#8](https://github.com/Strelizialeomon/ozon-dropship/issues/8) ｜ 状态：v1.0（2026-10-07；实施期 PR #15：§7 补实施细节、§8 记重审处置）｜ 发布序：**第 2 批**，S1-A 合并后开工；与 B、D、F 并行
 > 跨份验收与协作声明：S1 父 issue [#5](https://github.com/Strelizialeomon/ozon-dropship/issues/5)
+> 实施状态：已合并（PR #15），待上线 ｜ **受阻**：等 1688 买家自用版权限（issue #8，下次看 2026-10-14）
 
 ## 1. 管什么 / 不管什么
 
