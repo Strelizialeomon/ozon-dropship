@@ -1,7 +1,7 @@
 # spec-fulfillment-hub —— Ozon × 中国货源 · 履约中台（总 spec / 总纲）
 
 > Issue: 待开（本 spec 合并后按波次开实施 issue，届时回填号）
-> 状态：**v1.3**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR）
+> 状态：**v1.3**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR；PR #4 重审发现已处置，见 §14 第 2 次）
 > **设计权威 = 本文（总纲）**。S1 拆成 6 份子 spec（拆分地图见 §12.3；2026-10-07 owner 拍板，取代同日较早的「不拆子 spec」）；子 spec 只写落地、指向本文，与本文冲突时以本文为准。S2–S4 轮到时再定拆法。
 > 立项日期：2026-10-07 ｜ 需求方：owner
 > 长期决定见 §4.1 所列生效 ADR（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
@@ -88,6 +88,7 @@ RPA / 爬虫（违规 + 封号）；自动改价跟卖（库存同步只动库�
 - 鉴权：`access_token` 10 小时有效，用 `refresh_token` 续；`refresh_token` 有效期官方两处写法不一（随订购周期 / 半年）→ 按会过期处理（§5.8）。
 - 官方 SDK 有 Java / PHP / .Net / Python，**没有 Go**；签名为 HMAC-SHA1，自己实现。
 - **前置**：企业实名必过（营业执照 + 法人 + 对公账户）；下单类权限按月续订。
+- **限流额度未公开**【未验】：官方未见买家侧接口的限额与超限错误形态；实施期实测（§13.2）。
 
 ### 3.3 拼多多 / 淘宝：无官方买家侧 API【官方】
 
@@ -117,11 +118,15 @@ flowchart TD
   ORD --> FIN[财务域]
   CAT[商品域：映射·报价·库存同步·刊登] <--> CH
   PUR --> CAT
-  SHP --> CON[操作台 API]
-  PUR --> CON
-  CON <--> WEB[React 操作台（静态资源）]
-  CON --> DB[(MySQL 8.4)]
-  CON --> RD[(Redis：任务队列·会话)]
+  ST[店铺与凭据域 store] --> ORD
+  ORD --> API[各域自带的 /api handler（router 统一注册）]
+  PUR --> API
+  SHP --> API
+  CAT --> API
+  ST --> API
+  API <--> WEB[React 操作台（静态资源）]
+  API --> DB[(MySQL 8.4)]
+  API --> RD[(Redis：任务队列·会话)]
 ```
 
 - **形态**：Go 模块化单体，按域分包；asynq 后台任务与 HTTP 服务**同进程**；单机部署。
@@ -130,7 +135,7 @@ flowchart TD
   - **外部接口客户端**：`internal/ozon`、`internal/alibaba`（自写，见 §4.1）。
   - **基础设施** `internal/infra/`：DB、Redis 与 asynq 任务、限流、凭据保险箱、审计、通知、推送入口校验。
   - `internal/middleware/`（登录与角色）、`internal/router/`（唯一路由注册）、`cmd/api/`（启动装配）。
-  - **依赖方向**（只许单向、禁循环）：`infra` ← `ozon` / `alibaba` ← 业务包；业务包之间 `store`、`catalog` 在下，`order` 依赖 `store`，`purchase` 依赖 `order` 与 `catalog`，`shipment` 依赖 `order`。反方向的触发（如新订单要生成采购任务）走 asynq 任务，不反向 import。
+  - **依赖方向**：以 [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md) 为准（依赖链、反向触发走 asynq、接口归使用方的正文都在 ADR，本文不复述）。
 - **数据流**：推送 / 轮询拉单 → 订单入库 → 匹配供应商映射 → 生成采购任务 → 执行（1688 自动 / 人工渠道备料；**收货地址 = 中转点**）→ 国内段到中转点签收 → 备货 + 取 Ozon 面单贴单 → 交承运商（按 `tpl_integration_type` 决定是否回传单号）→ 轨迹跟踪 → 对账。
 
 ### 4.1 技术栈、仓库与部署（定稿，2026-10-07 owner 逐项拍板）
@@ -208,7 +213,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 
 - **拆单**：一个 Ozon 订单可拆成多个 posting（多包裹），以 posting 为单位建单，记 `order_number` 与 `parent_posting_number`。
 - **备货结果要复核**：`/v4/posting/fbs/ship` 返回 200 不代表成功，要再查 `substatus` 不是 `ship_failed`【官方】。
-- **异常判定（自动进池 + 通知）**：超时未采购；1688 下单失败；采购价变动超阈值；地址校验失败；发货截止（备货期最长可设 5 天【官方】）临近；国内段或中转点停滞；物流轨迹停滞；备货 `ship_failed`；仲裁。
+- **异常判定（自动进池 + 通知）**：超时未采购（S1）；1688 下单失败（S1）；采购价变动超阈值（S2）；地址校验失败（S1）；发货截止临近（S1；备货期最长可设 5 天【官方】）；国内段或中转点停滞（S1）；物流轨迹停滞（S3）；备货 `ship_failed`（S1）；仲裁（S1）；表外状态（S1）。异常落 `exceptions` 表（§6），同一对象同一 `code` 未处理时去重。
 - **没有它会怎样**：日 200–1000 单靠人记状态必乱；异常单被淹没。
 
 ### 5.3 供应商映射 + 报价表
@@ -222,14 +227,14 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 ### 5.4 凭据保险箱
 
 - 所有密钥（Ozon `Api-Key` × N 店、1688 应用密钥与 token）**加密存储**：用 Tink-go 加密，密文绑定所在表与行（挪到别的行解不开）；主密钥由 systemd 加密凭据注入，**不进 git、不放环境变量**。
-- 按店隔离；操作台只显示脱敏尾号；读取与轮换记审计；到期管理见 §5.8。
+- 按店隔离（例外：1688 token 是企业级凭据、不挂店，见 §6）；操作台只显示脱敏尾号；读取与轮换记审计；到期管理见 §5.8。
 - **没有它会怎样**：密钥散落，泄一个全线崩。
 
 ### 5.5 调度 + 限流重试
 
 - **任务载体**：asynq（Redis）承载异步任务与定时任务，worker 与 HTTP 服务同进程。
 - **防丢任务**：Redis 开 AOF 持久化；写库与入队不在同一事务 → 定时**补投扫描**：业务记录停在「待处理」超时的，重新入队；每个任务带幂等键，重复执行无副作用。
-- **限流**：每店 × 每接口一个令牌桶——总闸按每 Client-Id 50 次/秒，另叠加单接口限额（§3.1）；遇 429 按 `Retry-After` 等待；其余失败指数退避重试，**次数有上限**（默认 3 次），用尽进异常池。
+- **限流**：Ozon 每店 × 每接口一个令牌桶——总闸按每 Client-Id 50 次/秒，另叠加单接口限额（§3.1）；1688 为企业级凭据（无店铺维度）：按「应用 + 接口」一个桶，限额官方未公开【未验】、实施期实测（§13.2）；遇 429 / 超限错误按 `Retry-After`（有则）等待；其余失败指数退避重试，**次数有上限**（默认 3 次），用尽进异常池。
 - **幂等入库**：按 `store_id + posting_number` upsert。
 - **没有它会怎样**：手动刷单、触发限流甚至封禁；Redis 崩溃丢任务。
 
@@ -285,18 +290,19 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 
 | 表 | 关键字段 | 说明 |
 |---|---|---|
-| `stores` | id, name, mode(`rfbs`/`fbp`/`local`), client_id, currency, default_relay_point_id, push_enabled, status | 一店一行；模式决定走哪套拉单接口 |
+| `stores` | id, name, mode(`rfbs`/`fbp`/`local`), client_id, currency, default_relay_point_id, push_enabled, ship_early, last_sync_at, status | 一店一行；模式决定走哪套拉单接口；`last_sync_at` 最近一次同步成功（S1-D 写、§8 系统状态页读）；`ship_early` 备货提前（§13.1） |
 | `relay_points` | id, name, kind(`forwarder`/`own_warehouse`), address, contact, status | §5.7 |
-| `credentials` | store_id, kind, secret_enc, expires_at, last_verified_at, rotated_at | 密文存储（§5.4）+ 到期（§5.8） |
-| `supplier_offers` | platform, item_id, sku_id, url, purchase_price, domestic_freight, stock, order_channel(`self_use`/`cross_border`/`manual`), followed, status | 货源商品（§5.3） |
+| `credentials` | store_id（可空：空 = 企业级凭据）, kind, secret_enc, expires_at, last_verified_at, rotated_at | 密文存储（§5.4）+ 到期（§5.8）；`store_id` 为空 = 企业级凭据（1688 token，全平台共用；每种 kind 至多一行） |
+| `supplier_offers` | platform, item_id, sku_id, url, purchase_price, domestic_freight, stock, price_alert_threshold, order_channel(`self_use`/`cross_border`/`manual`), followed, status | 货源商品（§5.3）；`price_alert_threshold` 空 = 默认阈值（§13.1） |
 | `offer_links` | store_id, ozon_offer_id, supplier_offer_id, priority, target_stock, last_pushed_stock | 按店映射 + 库存同步（§5.3 / §5.10）；唯一键 `store_id + ozon_offer_id + supplier_offer_id` |
 | `orders` | store_id, posting_number, order_number, parent_posting_number, status, ozon_status, ozon_substatus, tpl_integration_type, ship_deadline, relay_point_id, buyer_enc, amounts, currency | 唯一键 `store_id + posting_number`（幂等） |
 | `order_items` | order_id, ozon_offer_id, qty, price, currency, offer_link_id | |
 | `purchase_tasks` | order_id, supplier_offer_id, channel, executor_type, status, payload, assignee, deadline, idempotency_key | §5.1 |
 | `purchase_orders` | task_id, platform_order_id, amount, currency, paid_at, domestic_carrier, domestic_tracking_no | 含价格快照；**国内快递号只在内部用，不回传 Ozon** |
 | `shipments` | order_id, tracking_no, tracking_source(`ozon`/`seller`), carrier, label_ref, handed_over_at, events | §7.4 |
+| `exceptions` | ref_type(`order`/`purchase_task`/`shipment`), ref_id, code, detail, status(`open`/`resolved`), handled_by, handled_at, note | 异常池（§5.2）；同一对象同一 `code` 未处理时去重 |
 | `inbound_events` | source(`ozon`/`1688`), dedupe_key, type, payload, received_at, processed_at | 推送收件箱（§5.9）；唯一键 `source + dedupe_key` |
-| `return_requests` | order_id, ozon_return_id, status, disposition, refund_amount, currency | §R5 |
+| `return_requests` | order_id, ozon_return_id, status, disposition, refund_amount, currency | 见 §2.2 R5 |
 | `finance_transactions` | store_id, ozon_txn_id, type, amount, currency_code, happened_at | §5.6 数据源 |
 | `order_settlements` | order_id, revenue, purchase_cost, domestic_freight, logistics_fee, commission, gross_profit, currency, reconciled_at | §5.6（两段运费分列） |
 | `audit_logs` | actor, action, object, detail, at | 全量操作留痕 |
@@ -344,7 +350,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 ### 7.3 人工渠道（拼多多 / 淘宝）
 
 - **备料单**内容：商品链接、规格、数量、**收货地址 = 中转点地址**、备注（含 `posting_number`）、期望时效——**不需要买家个人信息**。
-- **回填**：平台订单号、实付金额、国内快递单号；系统校验单号格式并抽检可达性。
+- **回填**：平台订单号、实付金额、国内快递单号；系统校验单号格式（「抽检可达性」需第三方快递查询服务、未选型——列入 §13.2）。
 - **不做**：任何形式的自动下单 / RPA（§2.3）。
 
 ### 7.4 物流
@@ -387,6 +393,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 ### S2 多店规模化 + 1688 全自动
 
 - [ ] 10+ 店并发运行 7 天无重大故障；日 1000 单压测通过
+- [ ] FBP 店接入：只同步状态与财务，不生成逐单采购、不走中转点（§13.1）
 - [ ] 推送 + 轮询：Ozon 推送**自到达起** ≤ 1 分钟入库；推送延迟或丢失时由对账轮询兜底（开推送的店 ≤ 30 分钟）；推送中断 1 小时，对账补齐、零漏单；1688 推送乱序不导致状态倒退
 - [ ] 库存同步：货源断货 → 对应 Ozon 库存 ≤ 15 分钟置 0；恢复后写回
 - [ ] 1688 免密支付自动下单（买家自用版 + 跨境自用版，按货源可切换），成功率 ≥ 95%，失败全部进异常池
@@ -445,7 +452,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 | 波 | 内容 | 验收 |
 |---|---|---|
 | **S1** | 地基（仓库骨架 + 多店模型 + 凭据保险箱与到期告警 + 调度）+ 单店端到端闭环（含中转点、人工渠道备料单） | §9·S1 |
-| **S2** | 10+ 店规模化 + 推送 + 库存同步 + 1688 全自动（两条通道 + 免密支付 + 异常队列驱动） | §9·S2 |
+| **S2** | 10+ 店规模化 + 推送 + 库存同步 + 1688 全自动（两条通道 + 免密支付 + 异常队列驱动）+ FBP 店接入（状态 / 财务同步） | §9·S2 |
 | **S3** | 物流深化（面单 / 轨迹）+ 退货域 | §9·S3 |
 | **S4** | 财务对账 + 采集刊登 | §9·S4 |
 
@@ -457,16 +464,16 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 
 | 份 | 文档 | 范围（只归它改的部分） | 发布序 |
 |---|---|---|---|
-| S1-A 后端地基 | [spec-s1a-foundation](spec-s1a-foundation.md) | `backend/` 骨架、依赖清单、启动装配、配置、迁移（S1 全部表）、`internal/infra/`（DB / Redis 任务 / 限流 / 凭据保险箱 / 审计 / 通知）、登录与角色、路由注册、`store` 包（店铺、凭据、到期告警） | 第 1 批，硬前置 |
+| S1-A 后端地基 | [spec-s1a-foundation](spec-s1a-foundation.md) | `backend/` 骨架、依赖清单、启动装配、配置、迁移（S1 全部表）、`internal/infra/`（DB / Redis 任务 / 限流 / 凭据保险箱 / 审计 / 通知）、登录与角色、路由注册、`store` 包（店铺、凭据、到期告警）、根 `README.md` / `AGENTS.md` 收尾 | 第 1 批，硬前置 |
 | S1-B Ozon 客户端 | [spec-s1b-ozon-client](spec-s1b-ozon-client.md) | `backend/internal/ozon/` | 第 2 批，A 合并后；与 C、D、F 并行 |
 | S1-C 1688 客户端 | [spec-s1c-alibaba-client](spec-s1c-alibaba-client.md) | `backend/internal/alibaba/` | 第 2 批，A 合并后；与 B、D、F 并行 |
 | S1-D 履约编排 | [spec-s1d-fulfillment](spec-s1d-fulfillment.md) | `order` / `purchase` / `shipment` / `catalog` 四个业务包（S1 范围） | 第 2 批开发；**须在 B、C 之后合并** |
 | S1-E 前端操作台 | [spec-s1e-console](spec-s1e-console.md) | `frontend/` 整个子项目（S1 页面） | A 合并后可开发；**须在 D 之后合并** |
-| S1-F 部署 | [spec-s1f-deploy](spec-s1f-deploy.md) | 仓库根 `deploy/` | 随时可开；验收要 A、E 的产物 |
+| S1-F 部署 | [spec-s1f-deploy](spec-s1f-deploy.md) | 仓库根 `deploy/` | 随时可开；**须在 A、E 之后合并**（验收要两者产物） |
 
 - **共享件只有一个主人**：`backend/go.mod`、`backend/cmd/api/`、`backend/internal/router/`、`backend/migrations/` 都归 S1-A。别的份确需改动（如 D 加一行路由注册、加一条迁移）：先在 S1 父 issue 下评论声明，合并前对表远端；迁移用 goose 时间戳编号，不撞号。
 - **跨份契约**：B、C 在各自子 spec 里列「对外方法清单」；D 在自己包里按清单定义小接口（Go 官方：接口放使用方），所以 D 不必等 B、C 合并就能开发和测试，由装配层把真实客户端接进来。D 列「操作台接口清单」，E 按清单手写调用。
-- **跨份的账挂 S1 父 issue**：§9·S1 的端到端闭环、两类中转点各跑一单、凭据到期告警端到端、两项指标、前端手写类型与后端接口对账——都在父 issue 验收，不挂在任何单份上。
+- **跨份的账挂 S1 父 issue**：§9·S1 的端到端闭环、两类中转点各跑一单、凭据到期告警端到端、两项指标、前端页面对真实后端的联调（S1-E 验收）——都在父 issue 验收，不挂在任何单份上。
 
 ---
 
@@ -476,20 +483,20 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 
 - 1688 下单通道按「货源商品」配置，默认买家自用版；采购任务上可临时改选（对 owner「可以任意选择」的落法）。
 - 中转点按店配默认、单个订单可改；下单备注写 `posting_number`。
-- 备货（调 ship）时机：默认货到中转点后；若中转点要提前拿面单，可按店改为提前（S1 实测定）。
+- 备货（调 ship）时机：默认货到中转点后；若中转点要提前拿面单，可按店改为提前（字段 `stores.ship_early`；S1 实测定）。
 - 轮询间隔：开推送的店对账 30 分钟；FBP / 未开推送的店 5 分钟；补投扫描 5 分钟。
 - 凭据到期告警提前 14 / 7 / 1 天。
 - 库存同步：全部货源无货才置 0；恢复写回 `target_stock`；合并批量推送。
 - 验收数字（§9 全部数字都是 agent 定的，含 v1.0 沿用的）：拉单延迟 ≤ 10 分钟；回传类操作成功率 ≥ 99%；10+ 店 7 天无重大故障、日 1000 单压测；推送自到达起 ≤ 1 分钟入库；断货 ≤ 15 分钟置 0；免密支付成功率 ≥ 95%；对账差异 ≤ 1%。
-- 采购价变动阈值：较映射报价上涨 ≥ 10% 暂停该任务并告警，按货源可调。
+- 采购价变动阈值：较映射报价上涨 ≥ 10% 暂停该任务并告警，按货源可调（字段 `supplier_offers.price_alert_threshold`，空 = 默认 10%）。
 - 重试上限：默认 3 次，用尽进异常池（含免密支付）。
 - 库存定时核对：每 10 分钟，只核有在售映射的货源商品。
 - Ozon 状态处于 `awaiting_registration` / `acceptance_in_progress` / `awaiting_approve` / `awaiting_verification` 时不生成采购任务；映射表外的状态一律进异常池。
-- FBP 店订单由 Ozon 仓发货：只同步状态与财务，不生成逐单采购任务、不走中转点；FBP 补货采购不在本 spec 范围（需要时另起 spec）。
+- FBP 店订单由 Ozon 仓发货：只同步状态与财务，不生成逐单采购任务、不走中转点（接入在 S2）；FBP 补货采购不在本 spec 范围（需要时另起 spec）。
 - Redis AOF 用每秒刷盘（`appendfsync everysec`）。
 - 金额 `DECIMAL(18,4)`；时间按 UTC 存，界面按需显示北京 / 莫斯科时间。
 - 后端配置照 xhs-analysis：viper + `backend/config/config.yaml`（入库只放 example）。
-- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/ozon` `internal/alibaba` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。包依赖规矩以 ADR-20261007-go-package-deps 为准，生成 ARCHITECTURE.md 时写成本项目约定，覆盖标准档「业务包互不 import」条款。
+- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/ozon` `internal/alibaba` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。包依赖与 ARCHITECTURE.md 覆盖规则以 ADR-20261007-go-package-deps 为准（标准档预填与生效 ADR 冲突处一律以 ADR 为准、未冲突照预填）；生成时把覆盖项写成本项目约定（至少：包依赖、登录、迁移）。
 - Caddy 静态资源找不到文件时回退 `index.html`（BrowserRouter 需要）。
 - Go 代码检查用 golangci-lint。
 - 中转点交接先用导出表格；货代有接口再对接。
@@ -501,6 +508,8 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 - 免密支付限额与总开关（S2 定）
 - PII 字段可见性按角色的具体粒度
 - 日志保留期
+- 人工渠道单号的可达性抽检：需第三方快递查询服务选型（§7.3）
+- 1688 侧限流限额与超限错误形态（官方未公开，实测后回填 §5.5 / §3.2）
 
 ---
 
@@ -535,3 +544,33 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 | 2-16 | 低 | 「断货 ≤ 15 分钟」缺定时核对频率；前台延迟未入风险 | 改：§5.10 / §13.1 定每 10 分钟核对；§10 第 3 条补延迟风险 |
 | 2-17 | 低 | 免密支付缺超时回查、重试无上限 | 改：§5.1 补支付防重，§5.5 重试上限 3 次，§10 第 9 条同步 |
 | 附注 | — | 根 README「需求确认中」将过期 | 改：README 更新当前状态并链到 spec |
+
+**第 2 次：重审（owner 2026-10-07 点选「改」），基准 `da75d78`**，原文见 PR #4 评论。两路：规格符合性（路一：中 1、轻微 9）、对抗式找 bug（路二：严重 1、中 3、轻微 11）。全部处置如下（v1.3；表内 3-x = 本次路一发现，4-x = 本次路二发现；各子 spec 的明细另见各自「审核修订记录」）。
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 3-1 | 中 | 子 spec 写「1688 权限已批」，与本文 §12.1「待申请」相抵 | 改：子 spec 改为「申请中」口径 |
+| 3-2 | 轻微 | 根 README 仍写 v1.2 | 改：README 升 v1.3 |
+| 3-3 | 轻微 | 子 spec 头部括注「B、C、D、F 都等 A 合并」与发布序不符 | 改：改为「B、C、D、E 都等它合并后开工；F 随时可开」 |
+| 3-4 | 轻微 | §12.3 把 E 的验收项算成 §9·S1 的账 | 改：本条改述为「前端页面对真实后端的联调（S1-E 验收）」 |
+| 3-5 | 轻微 | §12.3 A 行范围未列根 README / AGENTS | 改：补齐 |
+| 3-6 | 轻微 | S1-D 异常类型清单漏「仲裁」「地址校验失败」 | 改：§5.2 标注波次归属；子 spec 清单补齐 |
+| 3-7 | 轻微 | 自定细节漏项（子 spec A / E / C 各一处） | 改：三项补进各自自定细节节 |
+| 3-8 | 轻微 | ADR「否决」条把 hi-backend 转述成它没有的规矩（路二同报） | 改：ADR 按标准档原文改写，并写明「接口在消费方定义」一条沿用 |
+| 3-9 | 轻微 | ADR 外链锚点 `#hdr-Internal_Directories` 不存在 | 改：改为 `#hdr-Internal_packages`（实测该页锚点） |
+| 3-10 | 轻微 | §6 表里「§R5」写法（R5 是需求号不是章节号） | 改：写「见 §2.2 R5」 |
+| 4-1 | 严重 | 「异常池」无存储载体：12 张表没有它，D 的接口与验收指着空 | 改：新增 `exceptions` 表（§6）；A 迁移 12→13 张；§5.2 / 子 spec D 同步 |
+| 4-2 | 中 | 1688 token「无店」与「凭据按店（store_id 打头）」相抵 | 改：§6 定义 `store_id` 可空 = 企业级凭据；§5.4 / 子 spec A 契约 / 子 spec C 同步 |
+| 4-3 | 中 | 「各店最近一次同步成功时间」无存储、无写方 | 改：`stores.last_sync_at`（§6）；S1-D 写、`/api/system` 读；子 spec A / D 验收同步 |
+| 4-4 | 中 | ARCHITECTURE.md 覆盖口径只写「包依赖」一条，其余冲突没人定 | 改：ADR 决定 4 定「标准档预填与生效 ADR 冲突一律以 ADR 为准」；子 spec A 生成与验收同步 |
+| 4-5 | 轻微 | 子 spec C 装配接线没写「先声明」路径 | 改：补「先在 S1 父 issue 声明」 |
+| 4-6 | 轻微 | 1688 限流参数全空、桶形状先于限额冻结 | 改：§3.2 标【未验】；§5.5 / 子 spec A 定「应用级桶」；实测项进 §13.2 / 子 spec C |
+| 4-7 | 轻微 | 备料单「可达性抽检」无选型；「地址校验失败」无归属 | 改：抽检移 §13.2（未选型，S1 不做）；地址校验归 S1 并进子 spec D 清单 |
+| 4-8 | 轻微 | 自动采购「下单 → paid」推进路径没定义 | 改：子 spec D 定「记已付款（`GetOrder` 核对）」推进 |
+| 4-9 | 轻微 | F 的合并时点全表唯一悬空 | 改：§12.3 / 子 spec F 定「须在 A、E 之后合并」 |
+| 4-10 | 轻微 | §4 mermaid 未随 v1.3 包划分重绘（仍有单独「操作台 API」节点、缺 `store` 域） | 改：重绘 |
+| 4-11 | 轻微 | §4 复述 ADR 决定正文，与「只链接不复述」相抵 | 改：依赖方向一节改为只链接 |
+| 4-12 | 轻微 | （与 3-8 同一处，合并处置） | — |
+| 4-13 | 轻微 | FBP 拉单无波次归属（B 方法清单、§9·S2 都没有） | 改：归 S2（§12.2 / §9·S2 / §13.1 / 子 spec B 同步） |
+| 4-14 | 轻微 | 两处「可按维度调」无字段承载 | 改：§6 补 `stores.ship_early`、`supplier_offers.price_alert_threshold` |
+| 4-15 | 轻微 | Caddy 指向的前端产物目录没写死 | 改：定 `frontend/dist`（子 spec E / F 同步） |

@@ -1,7 +1,7 @@
 # spec-s1f-deploy —— S1-F 部署（子 spec）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」），本文是其子件 **S1-F**，只写落地；与总纲或生效 ADR 冲突时以它们为准。
-> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：随时可开；验收要 S1-A 的二进制与 S1-E 的构建产物
+> Issue: 待开 ｜ 状态：v1.0（2026-10-07）｜ 发布序：随时可开；**须在 A、E 之后合并**（验收要 S1-A 的二进制与 S1-E 的构建产物）
 > 跨份验收与协作声明：S1 父 issue（待开）
 
 ## 1. 管什么 / 不管什么
@@ -20,7 +20,7 @@
 
 照 [部署 ADR](../decisions/2026-10-07-deployment.md)：
 
-1. **Caddyfile**：自动 HTTPS；`/` 托管前端静态资源，找不到文件回退 `index.html`；`/api/*`、`/hooks/*` 反代到 Go。
+1. **Caddyfile**：自动 HTTPS；`/` 托管前端静态资源（S1-E 构建产物 `frontend/dist`），找不到文件回退 `index.html`；`/api/*`、`/hooks/*` 反代到 Go。
 2. **systemd unit**：托管 Go 程序；主密钥用 `LoadCredentialEncrypted` 注入，不放环境变量。
 3. **MySQL 8.4 与 Redis**：安装与配置说明；Redis 开 `appendonly yes` + `appendfsync everysec`。
 4. **备份**：每天 `mysqldump --single-transaction` 传到另一台机器或对象存储；binlog 保留 30 天；写恢复演练步骤（总纲 §13.1）。
@@ -47,4 +47,9 @@
 
 ## 7. 审核修订记录
 
-（审核完成后追加：# / 严重度 / 发现 / 处置）
+PR #4 重审（owner 2026-10-07 点选「改」）的处置：
+
+| # | 严重度 | 发现 | 处置 |
+|---|---|---|---|
+| 4-9 | 轻微 | 合并时点悬空 | 改：定「须在 A、E 之后合并」；总纲 §12.3 同步 |
+| 4-15 | 轻微 | 静态资源目录未写死 | 改：定 `frontend/dist` |

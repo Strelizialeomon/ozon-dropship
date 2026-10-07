@@ -16,19 +16,19 @@
    - 反方向的触发（如新订单要生成采购任务）走 asynq 任务，不反向 import。
 2. **接口放使用方**：只在真有需要时（反向调用、并行开发、替换实现）由使用方的包定义小接口；实现方返回具体类型；不为 mock 预先在实现方定义接口。
 3. 外部接口客户端放 `internal/ozon`、`internal/alibaba`，包名即用途。
-4. 目录骨架其余部分仍照 hi-backend 标准档（`cmd/`、`internal/<域>/`、`internal/infra/`、`internal/middleware/`、`internal/router/`、不建 `pkg/`）；生成 `backend/ARCHITECTURE.md` 时把本条写成项目约定，覆盖标准档「业务包互不 import」条款。
+4. 目录骨架其余部分仍照 hi-backend 标准档（`cmd/`、`internal/<域>/`、`internal/infra/`、`internal/middleware/`、`internal/router/`、不建 `pkg/`）。生成 `backend/ARCHITECTURE.md` 时：本条写成项目约定，覆盖标准档「域之间不许互相 import」条款；**标准档预填与生效 ADR 冲突的其余条款同样以 ADR 为准**，一并写进「本项目约定」（目前已知：登录——标准档 JWT，本项目用会话 cookie；迁移——标准档 GORM AutoMigrate，本项目用 goose 手写迁移；两者见 [ADR-20261007-backend-stack](2026-10-07-backend-stack.md)），未冲突条款照标准档预填。
 
 ## 依据（Go 官方）
 
 - 语言规范：「包直接或间接 import 自己是非法的」——循环是唯一的硬性禁止。[Import declarations](https://go.dev/ref/spec#Import_declarations)
 - 官方模块布局：服务端项目把实现逻辑的包放 `internal/`、命令放 `cmd/`；未限制 `internal/` 下的包互相引用。[Organizing a Go module](https://go.dev/doc/modules/layout)
-- `internal/` 只限制外部模块引用。[cmd/go · Internal Directories](https://pkg.go.dev/cmd/go#hdr-Internal_Directories)
+- `internal/` 只限制外部模块引用。[cmd/go · Internal packages](https://pkg.go.dev/cmd/go#hdr-Internal_packages)
 - 接口一般属于使用该接口的包；实现方返回具体类型；不要在实现方「为 mock」定义接口，也不要在用到之前定义。[Code Review Comments · Interfaces](https://go.dev/wiki/CodeReviewComments#interfaces)
 - 包按用途命名，避免 util / common / 统一接口包。[Package names](https://go.dev/blog/package-names)
 
 ## 否决了什么
 
-- hi-backend 标准档的「业务包之间互不 import、跨包一律接口 + 装配注入」。
+- hi-backend 标准档的「域之间不许互相 import；域只依赖 `internal/infra/` 与 `internal/middleware/`」（标准档的跨域共享出路是「横切下沉 infra、业务合并域或升重档」）；本项目改为可直接 import、只守单向与禁循环。标准档「接口在消费方定义」一条与本 ADR 一致，沿用。
 - 把 Ozon / 1688 客户端放进 `internal/infra/`。
 
 ## 接受的代价
