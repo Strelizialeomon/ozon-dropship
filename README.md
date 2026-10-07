@@ -1,6 +1,10 @@
 # ozon-dropship
 
-**一套自用的履约中台**：Ozon 店铺来单后自动接住，替你去中国货源平台下单代发，盯着中转点收货，再把国际快递单号回传回 Ozon——把「一天几百上千单全靠人手工搬」这件事交给程序。
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
+> **English**: A self-hosted fulfillment hub for Ozon (Russian marketplace) sellers sourcing from China (1688 and similar): it syncs orders, places dropship purchases, tracks shipping, and sends tracking numbers back to Ozon. Open source under AGPL-3.0.
+
+**一套自用的履约中台**：Ozon 店铺来单后自动接住，替你去中国货源平台下单代发，盯着中转点收货，再把国际快递单号回传回 Ozon——把「一天几百上千单全靠人手工搬」这件事交给程序。**已开源**（[AGPL-3.0](#许可)）。
 
 ## 前因后果
 
@@ -24,6 +28,21 @@ S1（地基 + 单店端到端闭环）的**六份代码已全部写完并合并*
 
 要上线时照交接手册的[〈从零上线〉](docs/handover.md)走：**要买什么、要准备哪些账号与凭据、每步大概多久、卡住看哪**都写在那份里；每个命令的细则以 [deploy/install.md](deploy/install.md) 为唯一真相源。
 
+## 开发者：本地跑起来
+
+前提：Go 1.27+、[Bun](https://bun.sh)、MySQL 8.x、Redis 7.x。完整开发说明（测试 / 风格 / 提交习惯）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+```bash
+# 后端（需本地 MySQL / Redis 已起，建表见 CONTRIBUTING.md）
+cd backend
+cp config/config.example.yaml config/config.yaml   # 按本机改数据库口令等
+go run ./cmd/api
+
+# 前端操作台（另一个终端）
+cd frontend
+bun install && bun run dev
+```
+
 ## 文档地图
 
 | 你是谁 | 从哪看起 |
@@ -34,6 +53,10 @@ S1（地基 + 单店端到端闭环）的**六份代码已全部写完并合并*
 
 目录速查：`backend/`（Go 后端）、`frontend/`（React 操作台）、`deploy/`（部署与备份脚本）、`docs/`（spec 与决策记录）。前后端依赖各自分开，见 [ADR-20261007-repo-layout](docs/decisions/2026-10-07-repo-layout.md)。
 
+## 参与
+
+欢迎 issue 和 PR——动手前先读 [CONTRIBUTING.md](CONTRIBUTING.md)（环境、测试、提交习惯）；**安全问题不要开公开 issue**，走 [SECURITY.md](SECURITY.md) 的私密通道。
+
 ## 这个仓怎么干活
 
 - **需求 → 设计 → 实施**走 spec-flow 两段流程：先出 spec 放 `docs/specs/`，再开 issue 实施，每份交付物合并前都要 owner 点一道审核档位。
@@ -41,3 +64,9 @@ S1（地基 + 单店端到端闭环）的**六份代码已全部写完并合并*
 - **每个 issue 挂状态标签**（未开始 / 进行中 / 待上线 / 待验证），卡住的另挂「受阻」「等拍板」——想知道某件事卡在哪，看标签就行。
 
 细则都在 [AGENTS.md](AGENTS.md)，本节不复述。
+
+## 许可
+
+[AGPL-3.0](LICENSE) © 2026 Strelizialeomon
+
+你可以自由使用、修改、分发本项目；但**改过的版本必须同样以 AGPL-3.0 开源**——包括把它作为网络服务提供给别人的场景（AGPL 第 13 条）。

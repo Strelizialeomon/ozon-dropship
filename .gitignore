@@ -1,0 +1,6 @@
+# OS / 编辑器 / 本地工具（各子目录另有自己的 .gitignore）
+.DS_Store
+.claude/
+.idea/
+.vscode/
+*.swp
