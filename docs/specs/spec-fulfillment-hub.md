@@ -1,8 +1,8 @@
-# spec-fulfillment-hub —— Ozon × 中国货源 · 履约中台（总 spec，一份装全）
+# spec-fulfillment-hub —— Ozon × 中国货源 · 履约中台（总 spec / 总纲）
 
 > Issue: 待开（本 spec 合并后按波次开实施 issue，届时回填号）
-> 状态：**v1.2**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14）
-> **设计权威 = 本文**——本仓只有这一份 spec，不拆子 spec；实施按波次拆 issue（2026-10-07 owner 拍板）。
+> 状态：**v1.3**（2026-10-07：v1.1 调研修订——纠正 1688 下单通道、物流单号口径，补入 Ozon 密钥有效期 / 限流 / 推送等新事实，新增 4 条机制，技术栈与仓库结构定稿并落 ADR；v1.2 处置重审 24 条发现，见 §14；v1.3 拆出 S1 的 6 份子 spec，见 §12.3；包划分与依赖规矩落 ADR）
+> **设计权威 = 本文（总纲）**。S1 拆成 6 份子 spec（拆分地图见 §12.3；2026-10-07 owner 拍板，取代同日较早的「不拆子 spec」）；子 spec 只写落地、指向本文，与本文冲突时以本文为准。S2–S4 轮到时再定拆法。
 > 立项日期：2026-10-07 ｜ 需求方：owner
 > 长期决定见 §4.1 所列生效 ADR（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
 > 调研依据：本仓 [Issue #1](https://github.com/Strelizialeomon/ozon-dropship/issues/1)（三轮调研，含全部来源链接）。本文只放结论与设计。
@@ -125,11 +125,12 @@ flowchart TD
 ```
 
 - **形态**：Go 模块化单体，按域分包；asynq 后台任务与 HTTP 服务**同进程**；单机部署。
-- **域划分**：
-  - `channel/ozon`、`channel/alibaba`、`channel/manual`——三类渠道的 API 适配与差异封装（Ozon / 1688 客户端自写，见 §4.1）
-  - `order` / `purchase` / `shipment`（含中转点）/ `returns` / `finance` / `catalog`（映射、报价、库存同步、采集刊登）——六个业务域
-  - `console`——操作台 HTTP API
-  - `platform`——横切：任务调度（asynq）、推送入口、限流、凭据保险箱、审计、通知、DB
+- **包划分**（目录骨架照 hi-backend 标准档；**包之间的依赖规矩按 Go 官方**，见 [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）：
+  - **业务包** `internal/<域>/`：`store`（店铺与凭据管理）/ `order` / `purchase`（含人工渠道备料单）/ `shipment`（含中转点）/ `catalog`（映射、报价、库存同步、采集刊登）/ `returns` / `finance`。各包自带操作台接口的 handler（不设单独的操作台 API 层）。
+  - **外部接口客户端**：`internal/ozon`、`internal/alibaba`（自写，见 §4.1）。
+  - **基础设施** `internal/infra/`：DB、Redis 与 asynq 任务、限流、凭据保险箱、审计、通知、推送入口校验。
+  - `internal/middleware/`（登录与角色）、`internal/router/`（唯一路由注册）、`cmd/api/`（启动装配）。
+  - **依赖方向**（只许单向、禁循环）：`infra` ← `ozon` / `alibaba` ← 业务包；业务包之间 `store`、`catalog` 在下，`order` 依赖 `store`，`purchase` 依赖 `order` 与 `catalog`，`shipment` 依赖 `order`。反方向的触发（如新订单要生成采购任务）走 asynq 任务，不反向 import。
 - **数据流**：推送 / 轮询拉单 → 订单入库 → 匹配供应商映射 → 生成采购任务 → 执行（1688 自动 / 人工渠道备料；**收货地址 = 中转点**）→ 国内段到中转点签收 → 备货 + 取 Ozon 面单贴单 → 交承运商（按 `tpl_integration_type` 决定是否回传单号）→ 轨迹跟踪 → 对账。
 
 ### 4.1 技术栈、仓库与部署（定稿，2026-10-07 owner 逐项拍板）
@@ -144,6 +145,7 @@ flowchart TD
 | [ADR-20261007-backend-stack](../decisions/2026-10-07-backend-stack.md) | Go + gin + GORM + MySQL 8.4 + Redis/asynq 等后端选型 |
 | [ADR-20261007-frontend-stack](../decisions/2026-10-07-frontend-stack.md) | React + Bun + Rsbuild + 声明式 React Router + jotai + shadcn/ui + Axios |
 | [ADR-20261007-deployment](../decisions/2026-10-07-deployment.md) | 单机、不用 Docker；Caddy 管 HTTPS 和前端静态资源；systemd 托管 Go |
+| [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md) | Go 包依赖按官方：可直接 import、只许单向、禁循环；接口放使用方 |
 
 部署拓扑（一台 Linux 服务器）：
 
@@ -363,7 +365,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 - **页面**：订单工作台（列表 / 筛选 / 详情 / 批量）/ 采购任务台 / 异常池 / 映射与报价 / 中转点与打包 / 店铺与凭据（含到期）/ 退货 / 财务 / 刊登 / 系统状态（队列积压、失败任务、各店最近一次同步成功时间）。
 - **双轨原则**：每个自动化动作都有手动等价入口；手动动作同样留审计。自动化是「可开关的加速器」，不是黑箱。
 - **角色**：`admin` / `operator` 两级起步；登录用 session cookie（会话存 Redis）。
-- **前端**：见 §4.1 前端 ADR；调 `console` 域 API，类型与调用手写。
+- **前端**：见 §4.1 前端 ADR；调各业务域提供的操作台接口，类型与调用手写。
 
 ---
 
@@ -447,7 +449,24 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 | **S3** | 物流深化（面单 / 轨迹）+ 退货域 | §9·S3 |
 | **S4** | 财务对账 + 采集刊登 | §9·S4 |
 
-实施拆分：**spec 不拆，按波次拆 issue**——本 spec 合并后开 S1 issue，后续波次依次开（各自锚本文永久链接）。
+实施拆分：S1 拆成 6 份子 spec（§12.3），每份各开一个实施 issue；另开 1 个 **S1 父 issue** 承担跨份验收与协作声明。S2–S4 轮到时再定拆法（子 spec 或只拆 issue），现在不预拆——细节到时会变。
+
+### 12.3 拆分地图（S1）
+
+按施工面切：每份能派一个 agent 独立读完、独立干完、独立验收、不碰别人的文件。
+
+| 份 | 文档 | 范围（只归它改的部分） | 发布序 |
+|---|---|---|---|
+| S1-A 后端地基 | [spec-s1a-foundation](spec-s1a-foundation.md) | `backend/` 骨架、依赖清单、启动装配、配置、迁移（S1 全部表）、`internal/infra/`（DB / Redis 任务 / 限流 / 凭据保险箱 / 审计 / 通知）、登录与角色、路由注册、`store` 包（店铺、凭据、到期告警） | 第 1 批，硬前置 |
+| S1-B Ozon 客户端 | [spec-s1b-ozon-client](spec-s1b-ozon-client.md) | `backend/internal/ozon/` | 第 2 批，A 合并后；与 C、D、F 并行 |
+| S1-C 1688 客户端 | [spec-s1c-alibaba-client](spec-s1c-alibaba-client.md) | `backend/internal/alibaba/` | 第 2 批，A 合并后；与 B、D、F 并行 |
+| S1-D 履约编排 | [spec-s1d-fulfillment](spec-s1d-fulfillment.md) | `order` / `purchase` / `shipment` / `catalog` 四个业务包（S1 范围） | 第 2 批开发；**须在 B、C 之后合并** |
+| S1-E 前端操作台 | [spec-s1e-console](spec-s1e-console.md) | `frontend/` 整个子项目（S1 页面） | A 合并后可开发；**须在 D 之后合并** |
+| S1-F 部署 | [spec-s1f-deploy](spec-s1f-deploy.md) | 仓库根 `deploy/` | 随时可开；验收要 A、E 的产物 |
+
+- **共享件只有一个主人**：`backend/go.mod`、`backend/cmd/api/`、`backend/internal/router/`、`backend/migrations/` 都归 S1-A。别的份确需改动（如 D 加一行路由注册、加一条迁移）：先在 S1 父 issue 下评论声明，合并前对表远端；迁移用 goose 时间戳编号，不撞号。
+- **跨份契约**：B、C 在各自子 spec 里列「对外方法清单」；D 在自己包里按清单定义小接口（Go 官方：接口放使用方），所以 D 不必等 B、C 合并就能开发和测试，由装配层把真实客户端接进来。D 列「操作台接口清单」，E 按清单手写调用。
+- **跨份的账挂 S1 父 issue**：§9·S1 的端到端闭环、两类中转点各跑一单、凭据到期告警端到端、两项指标、前端手写类型与后端接口对账——都在父 issue 验收，不挂在任何单份上。
 
 ---
 
@@ -470,7 +489,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 - Redis AOF 用每秒刷盘（`appendfsync everysec`）。
 - 金额 `DECIMAL(18,4)`；时间按 UTC 存，界面按需显示北京 / 莫斯科时间。
 - 后端配置照 xhs-analysis：viper + `backend/config/config.yaml`（入库只放 example）。
-- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。
+- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/ozon` `internal/alibaba` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。包依赖规矩以 ADR-20261007-go-package-deps 为准，生成 ARCHITECTURE.md 时写成本项目约定，覆盖标准档「业务包互不 import」条款。
 - Caddy 静态资源找不到文件时回退 `index.html`（BrowserRouter 需要）。
 - Go 代码检查用 golangci-lint。
 - 中转点交接先用导出表格；货代有接口再对接。
