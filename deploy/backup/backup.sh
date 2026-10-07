@@ -67,7 +67,10 @@ if [ -n "${RSYNC_REMOTE:-}" ]; then
   ssh "$RHOST" "mkdir -p '$RPATH/db' '$RPATH/binlog'"
   log "rsync → $RSYNC_REMOTE"
   rsync -a "$DUMP_GZ" "$DUMP_GZ.sha256" "$RSYNC_REMOTE/db/"
-  rsync -a --exclude "$CURRENT_BINLOG" "$BINLOG_DIR/" "$RSYNC_REMOTE/binlog/"
+  # 只拷 binlog 文件（datadir 与 binlog 同目录时，别把整个数据目录拖走）；
+  # rsync 规则按命令行顺序先匹配先算：先排除正在写的那个（写一半的不算备份），再放行 binlog.*，其余全挡
+  rsync -a --exclude "$CURRENT_BINLOG" --include='binlog.[0-9]*' --exclude='*' \
+    "$BINLOG_DIR/" "$RSYNC_REMOTE/binlog/"
 
   # ── 4. 两端按保留期清理（远端不加 rsync --delete：本地坏了不能反过来清远端）──
   log "清理本地 > $RETENTION_DAYS 天的 dump"
@@ -79,7 +82,13 @@ else
   log "rclone → $RCLONE_REMOTE"
   rclone copy "$DUMP_GZ" "$RCLONE_REMOTE/db/" --checksum
   rclone copy "$DUMP_GZ.sha256" "$RCLONE_REMOTE/db/"
-  rclone copy "$BINLOG_DIR" "$RCLONE_REMOTE/binlog/" --exclude "$CURRENT_BINLOG"
+  # 同样只拷 binlog 文件。rclone 的 --include/--exclude 会按类型重排优先级（include 恒在前），
+  # 混用会把「正在写的那个」也带进去——照官方口径改用 --filter 显式定序：先排除在写的，
+  # 再放行 binlog.*，其余全挡（规则先匹配先算，顺序即优先级）
+  rclone copy "$BINLOG_DIR" "$RCLONE_REMOTE/binlog/" \
+    --filter "- $CURRENT_BINLOG" \
+    --filter '+ binlog.[0-9]*' \
+    --filter '- *'
 
   log "清理本地 > $RETENTION_DAYS 天的 dump"
   find "$LOCAL_DIR/db" -name 'db-*.sql.gz*' -type f -mtime "+$RETENTION_DAYS" -delete
