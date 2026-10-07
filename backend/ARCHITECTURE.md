@@ -2,7 +2,7 @@
 
 > 由 hi-backend init 生成于 2026-10-07（Go 标准档 + 本项目约定）。audit 以本文件为准。
 > 细则见 hi-backend tier-standard；**与本「本项目约定」冲突处，一律以本项目约定为准**
-> （依据：[ADR-20261007-go-package-deps](../docs/decisions/2026-10-07-go-package-deps.md)、
+> （依据：[ADR-20261007-go-package-deps-v2](../docs/decisions/2026-10-07-go-package-deps-v2.md)、
 > [ADR-20261007-backend-stack](../docs/decisions/2026-10-07-backend-stack.md)）。
 
 ## 项目概况
@@ -37,8 +37,10 @@
 
 - 域 → `infra/` / `middleware/`；禁止复活 `internal/service/`；无 `pkg/`。
 - **业务包之间可直接 import，但只许单向、禁循环**（覆盖标准档「域之间禁止横向 import」）：
-  `infra/*` ← `ozon`、`alibaba` ← 业务包；业务包之间 `store`、`catalog` 在下，
-  `order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`；`shipment` 依赖 `order`。
+  `infra/*` ← `ozon`、`alibaba` ← 业务包；业务包之间 `store`、`catalog` 在下（上方各包都可用），
+  `order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`、`store`；
+  `shipment` 依赖 `order`、`purchase`、`store`（`purchase` 这条是 2026-10-07 新增，
+  用途：交接对照表要 `purchase_orders.domestic_tracking_no`；只走一条只读方法，不写 purchase 的表）。
   反方向的触发（如新订单要生成采购任务）走 asynq 任务，不反向 import。
 - **接口放使用方**：只在真需要时（反向调用、并行开发、替换实现）由使用方的包定义小接口；
   实现方返回具体类型；不为 mock 预先在实现方定义接口。
@@ -77,7 +79,7 @@
 ## 本项目约定（覆盖标准档预填，依据生效 ADR）
 
 1. **包依赖**：见「依赖方向规则」——业务包可单向 import、接口放使用方、客户端放
-   `internal/ozon|alibaba`。（ADR-20261007-go-package-deps）
+   `internal/ozon|alibaba`。（ADR-20261007-go-package-deps-v2）
 2. **登录**：scs 会话 cookie，会话存 Redis，**不用 JWT**。（ADR-20261007-backend-stack）
 3. **迁移**：goose 手写 SQL，**生产不用 GORM AutoMigrate**。（同上）
 4. **模型与表**：表名复数、与总纲 §6 一致，用 `TableName()` 显式声明；主键 = 雪花 ID 字符串；
@@ -90,3 +92,4 @@
 ## 修订记录
 
 - 2026-10-07：init 初版（Go 标准档 + 本项目约定：包依赖 / 登录 / 迁移 / 模型表名 / CORS / 日志 / 外键）。
+- 2026-10-07：依赖链补 `shipment` → `purchase`（ADR-20261007-go-package-deps-v2；实现见 PR #16）。

@@ -5,7 +5,7 @@
 - 决策人：用户（owner）
 - 适用范围：`backend/` 全部 Go 包的依赖关系与目录命名
 - 取代：无
-- 被取代：[ADR-20261007-go-package-deps-v2](2026-10-07-go-package-deps-v2.md)（2026-10-07：依赖链补一条 `shipment` → `purchase`）
+- 被取代：[ADR-20261007-go-package-deps-v2](2026-10-07-go-package-deps-v2.md)
 - 决策来源：2026-10-07 会话（owner：hi-backend「业务域之间禁止互相 import」不以为准，要求按 Go 官方；选择卡点选「单向、禁循环」与「`internal/ozon`、`internal/alibaba`」）
 
 ## 决定

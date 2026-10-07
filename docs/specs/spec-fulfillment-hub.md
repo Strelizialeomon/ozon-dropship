@@ -130,12 +130,12 @@ flowchart TD
 ```
 
 - **形态**：Go 模块化单体，按域分包；asynq 后台任务与 HTTP 服务**同进程**；单机部署。
-- **包划分**（目录骨架照 hi-backend 标准档；**包之间的依赖规矩按 Go 官方**，见 [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）：
+- **包划分**（目录骨架照 hi-backend 标准档；**包之间的依赖规矩按 Go 官方**，见 [ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md)）：
   - **业务包** `internal/<域>/`：`store`（店铺与凭据管理）/ `order` / `purchase`（含人工渠道备料单）/ `shipment`（含中转点）/ `catalog`（映射、报价、库存同步、采集刊登）/ `returns` / `finance`。各包自带操作台接口的 handler（不设单独的操作台 API 层）。
   - **外部接口客户端**：`internal/ozon`、`internal/alibaba`（自写，见 §4.1）。
   - **基础设施** `internal/infra/`：DB、Redis 与 asynq 任务、限流、凭据保险箱、审计、通知、推送入口校验。
   - `internal/middleware/`（登录与角色）、`internal/router/`（唯一路由注册）、`cmd/api/`（启动装配）。
-  - **依赖方向**：以 [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md) 为准（依赖链、反向触发走 asynq、接口归使用方的正文都在 ADR，本文不复述）。
+  - **依赖方向**：以 [ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md) 为准（依赖链、反向触发走 asynq、接口归使用方的正文都在 ADR，本文不复述）。
 - **数据流**：推送 / 轮询拉单 → 订单入库 → 匹配供应商映射 → 生成采购任务 → 执行（1688 自动 / 人工渠道备料；**收货地址 = 中转点**）→ 国内段到中转点签收 → 备货 + 取 Ozon 面单贴单 → 交承运商（按 `tpl_integration_type` 决定是否回传单号）→ 轨迹跟踪 → 对账。
 
 ### 4.1 技术栈、仓库与部署（定稿，2026-10-07 owner 逐项拍板）
@@ -150,7 +150,7 @@ flowchart TD
 | [ADR-20261007-backend-stack](../decisions/2026-10-07-backend-stack.md) | Go + gin + GORM + MySQL 8.4 + Redis/asynq 等后端选型 |
 | [ADR-20261007-frontend-stack](../decisions/2026-10-07-frontend-stack.md) | React + Bun + Rsbuild + 声明式 React Router + jotai + shadcn/ui + Axios |
 | [ADR-20261007-deployment](../decisions/2026-10-07-deployment.md) | 单机、不用 Docker；Caddy 管 HTTPS 和前端静态资源；systemd 托管 Go |
-| [ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md) | Go 包依赖按官方：可直接 import、只许单向、禁循环；接口放使用方 |
+| [ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md) | Go 包依赖按官方：可直接 import、只许单向、禁循环；接口放使用方；依赖链含 `shipment` → `purchase`（2026-10-07 补） |
 
 部署拓扑（一台 Linux 服务器）：
 
@@ -496,7 +496,7 @@ Go 程序 ──▶ MySQL 8.4（本机）、Redis（本机，开 AOF）
 - Redis AOF 用每秒刷盘（`appendfsync everysec`）。
 - 金额 `DECIMAL(18,4)`；时间按 UTC 存，界面按需显示北京 / 莫斯科时间。
 - 后端配置照 xhs-analysis：viper + `backend/config/config.yaml`（入库只放 example）。
-- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/ozon` `internal/alibaba` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。包依赖与 ARCHITECTURE.md 覆盖规则以 ADR-20261007-go-package-deps 为准（标准档预填与生效 ADR 冲突处一律以 ADR 为准、未冲突照预填）；生成时把覆盖项写成本项目约定（至少：包依赖、登录、迁移）。
+- 后端目录开工时按 hi-backend 判定器生成 `backend/ARCHITECTURE.md`，以判定器实判为准；预判「按业务分包的单体」：`cmd/` `internal/<域>/` `internal/ozon` `internal/alibaba` `internal/infra/` `config/`，**不建 `pkg/`**（hi-backend 标准档规则；xhs-analysis 的 `pkg/` 不照搬）。包依赖与 ARCHITECTURE.md 覆盖规则以 ADR-20261007-go-package-deps-v2 为准（标准档预填与生效 ADR 冲突处一律以 ADR 为准、未冲突照预填）；生成时把覆盖项写成本项目约定（至少：包依赖、登录、迁移）。
 - Caddy 静态资源找不到文件时回退 `index.html`（BrowserRouter 需要）。
 - Go 代码检查用 golangci-lint。
 - 中转点交接先用导出表格；货代有接口再对接。

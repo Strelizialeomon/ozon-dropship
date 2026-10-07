@@ -18,7 +18,7 @@
 - **独占**：`backend/internal/{order,purchase,shipment,catalog}/**`。
 - **不碰**：`internal/{ozon,alibaba}`（B、C）、S1-A 的独占目录、`frontend/**`、`deploy/**`。
 - **共享件**（先在 S1 父 issue 声明再改）：`internal/router` 的注册行、`cmd/api` 的装配行、如需新增迁移文件。
-- **依赖方向**（[ADR-20261007-go-package-deps](../decisions/2026-10-07-go-package-deps.md)）：`catalog` 在下；`order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`；`shipment` 依赖 `order`。新订单要生成采购任务：`order` 入库后投 asynq 任务，由 `purchase` 处理，不反向 import。
+- **依赖方向**（[ADR-20261007-go-package-deps-v2](../decisions/2026-10-07-go-package-deps-v2.md)）：`store`、`catalog` 在下（上方各包都可用）；`order` 依赖 `store`；`purchase` 依赖 `order`、`catalog`、`store`；`shipment` 依赖 `order`、`purchase`、`store`（`purchase` 这条 2026-10-07 新增：交接对照表要国内快递号，只读不写）。新订单要生成采购任务：`order` 入库后投 asynq 任务，由 `purchase` 处理，不反向 import。
 - **对 B、C 的调用**：按它们子 spec 的「对外方法清单」，在本份各包里定义所需的小接口；测试用假实现，装配层接真实客户端——所以开发不用等 B、C 合并。
 
 ## 3. 要做的事
