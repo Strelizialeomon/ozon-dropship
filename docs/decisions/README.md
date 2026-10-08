@@ -33,6 +33,7 @@
 | [ADR-20261007-go-package-deps-v2](2026-10-07-go-package-deps-v2.md) | 生效中 | 在 v1 基础上补一条 `shipment` → `purchase` |
 | [ADR-20261007-handover-s2-first](2026-10-07-handover-s2-first.md) | 生效中 | 接手人是非技术 owner；接手后先推 S2 开发，不先上线 |
 | [ADR-20261007-open-source](2026-10-07-open-source.md) | 生效中 | 项目以 AGPL-3.0 开源，全仓（含文档与 issue）公开 |
+| [ADR-20261008-public-docs-boundary](2026-10-08-public-docs-boundary.md) | 生效中 | 公开仓文档分两层：门面与入口文档按对外口径写，工作文档层保留内部叙述 |
 
 ## 本仓落点
 
