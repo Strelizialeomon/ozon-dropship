@@ -1,7 +1,7 @@
 # spec-public-docs —— 公开向文档改造（门面 + 入口文档去内部化）
 
 > **总 spec = 设计权威**：[spec-fulfillment-hub](spec-fulfillment-hub.md)（下称「总纲」）。本文是**独立需求**，不属 S1 六份子 spec；与总纲或生效 ADR 冲突时以它们为准。
-> 实施单：待开——本 spec 合并后开（见 §3.6）｜ 状态：v1.0（2026-10-08）
+> 实施单：[#30](https://github.com/Strelizialeomon/ozon-dropship/issues/30) ｜ 状态：v1.1（2026-10-08：回填实施单号）
 > 与已合并两份的关系：**改对外叙述口径、不动其设计**——覆盖 [spec-handover-docs](spec-handover-docs.md) 定义的 README「门口层」（其正文按「某次需求在当时应当怎么实施」留痕，不回写）；[spec-open-source](spec-open-source.md) §3.2 的五件公开增量（英文摘要 / 徽章 / 开发者快速开始 / 参与 / 许可）**全部保留**。
 > 长期决定见 [ADR-20261008-public-docs-boundary](../decisions/2026-10-08-public-docs-boundary.md)（本文只链接、不复述决定正文；ADR 与本文不一致时以 ADR 为准）。
 
