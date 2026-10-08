@@ -1,4 +1,4 @@
-# deploy —— S1-F 部署
+# deploy —— 部署
 
 单机部署的落地文件（设计：[总纲 §4.1](../docs/specs/spec-fulfillment-hub.md) 与
 [ADR-20261007-deployment](../docs/decisions/2026-10-07-deployment.md)）：
@@ -8,14 +8,14 @@
 
 | 本目录 | 落点 | 干什么 |
 |---|---|---|
-| `Caddyfile` | `/etc/caddy/Caddyfile` | HTTPS、静态资源 + SPA 回退、`/api` 反代（`/hooks` 属 S2 推送份，先注释） |
+| `Caddyfile` | `/etc/caddy/Caddyfile` | HTTPS、静态资源 + SPA 回退、`/api` 反代（`/hooks` 为消息推送预留，先注释） |
 | `systemd/fulfillment-hub.service` | `/etc/systemd/system/` | 托管 Go（主密钥经加密凭据注入） |
 | `systemd/fulfillment-hub-backup.{service,timer}` | `/etc/systemd/system/` | 每日备份定时器 |
 | `mysql/fulfillment-hub.cnf` | `/etc/mysql/mysql.conf.d/` | binlog 保留 30 天 |
 | `redis/fulfillment-hub.conf` | `/etc/redis/`（include 进 redis.conf） | AOF 开 |
 | `backup/backup.sh` | `/usr/local/bin/hub-backup` | 每日 dump + binlog 外送 + 两端清理 |
 | `backup/backup.{cnf,env}.example` | `/etc/fulfillment-hub/backup.{cnf,env}` | 备份凭据与目的地（0600） |
-| `line-test/` | 三台按量机临时跑 | 线路实测（报告贴 S1 父 issue） |
+| `line-test/` | 三台按量机临时跑 | 线路实测（产出选址报告） |
 
 **从零安装照 [install.md](install.md)；日常发布照 [release.md](release.md)。**
 
@@ -28,7 +28,7 @@
 /etc/credstore.encrypted/  systemd 加密主密钥
 ```
 
-## 与 S1-A / S1-E 的对接点（本目录先钉住，合并时对表）
+## 对接点（部署侧与前后端的约定）
 
 | 约定 | 值 | 落地在哪 |
 |---|---|---|
@@ -39,10 +39,10 @@
 | 静态资源目录 | `/srv/fulfillment-hub/web`（= `frontend/dist` 的内容） | Caddyfile 的 `root` |
 
 > unit 还带基础进程加固（NoNewPrivileges / PrivateTmp / ProtectSystem=strict / ProtectHome）：
-> `ProtectSystem=strict` 下应用只能写 `/opt/fulfillment-hub`——已对表：A 实装无额外落盘路径（日志走 stdout），`ReadWritePaths` 无需放宽。
-> 五条对接点已于 2026-10-07 与 A、E 实装逐一对表；修正记录见 `docs/specs/spec-s1f-deploy.md` §7。
+> `ProtectSystem=strict` 下应用只能写 `/opt/fulfillment-hub`——已对表：后端无额外落盘路径（日志走 stdout），`ReadWritePaths` 无需放宽。
+> 五条对接点已于 2026-10-07 与前后端实装逐一对表；记录见 `docs/specs/spec-s1f-deploy.md` §7。
 
-## 验收对照（issue #11）
+## 验收对照
 
 | 验收 | 怎么验 |
 |---|---|
@@ -50,4 +50,4 @@
 | 重启自动起；主密钥不入环境变量与进程参数 | [install.md](install.md) §8、§12 |
 | Redis AOF 已开 | `redis-cli CONFIG GET appendonly appendfsync` |
 | 备份跑一次；恢复到指定时刻 | [backup/restore-drill.md](backup/restore-drill.md) |
-| 线路实测报告贴父 issue | [line-test/README.md](line-test/README.md)（需先租三地按量机，owner 点头后跑） |
+| 线路实测报告 | [line-test/README.md](line-test/README.md)（需先租三地按量机） |

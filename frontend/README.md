@@ -1,4 +1,4 @@
-# frontend —— 履约中台操作台（S1-E）
+# frontend —— 履约中台操作台
 
 React + Bun + Rsbuild + React Router（声明式）+ jotai + shadcn/ui（Tailwind v4）+ Axios。
 选型与理由见 [ADR-20261007-frontend-stack](../docs/decisions/2026-10-07-frontend-stack.md)；页面范围见
@@ -9,7 +9,7 @@ React + Bun + Rsbuild + React Router（声明式）+ jotai + shadcn/ui（Tailwin
 ```bash
 bun install
 bun run dev        # 开发服务器（:3000），/api 代理到本机 Go（:8080，可用 API_PROXY_TARGET 覆盖）
-bun run build      # 生产构建 → dist/（S1-F 的 Caddy 指向它）
+bun run build      # 生产构建 → dist/（生产由 Caddy 指向它）
 bun run test       # bun test（happy-dom + testing-library，preload 见 test-setup.ts）
 bun run typecheck  # tsc --noEmit
 bun run fmt        # dprint 格式化；CI/验收用 bunx dprint check
@@ -36,7 +36,7 @@ src/
 ## 两处“非标准”实现，动机都写在代码注释里
 
 - **shadcn 组件是 registry 源码改写导入**：2026 版 shadcn registry 已切到 `radix-ui` 统一包 + `cn` npm 包，
-  本仓沿用分体包（`@radix-ui/react-*`）与 `@/lib/utils` 的 `cn`（与 owner 现有项目一致），
+  本仓沿用分体包（`@radix-ui/react-*`）与 `@/lib/utils` 的 `cn`，
   组件本体（new-york-v4）保持与 registry 一致，只改了 import 行。React 19（registry 源码按 ref-as-prop 写）。
-- **`perf/` 是千行表格性能实测工具**（S1-E 开工实测）：`bun perf/run.mjs` 构建 → 起静态服务 → 无头 chromium
+- **`perf/` 是千行表格性能实测工具**（开工实测）：`bun perf/run.mjs` 构建 → 起静态服务 → 无头 chromium
   跑 1000 行渲染/排序/筛选并判红绿。产物落 `dist-perf/`，不进生产 `dist/`。

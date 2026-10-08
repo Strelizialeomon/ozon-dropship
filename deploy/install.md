@@ -1,6 +1,6 @@
 # install —— 从零安装手册（Ubuntu 24.04 LTS / Debian 12+）
 
-> 照本文件在一台**干净测试机**上装完，即完成 issue #11 前三、四条验收的技术部分。
+> 照本文件在一台**干净测试机**上从头装完，即完成验收清单（§12）前三、四条的技术部分。
 > 规则（ADR）：不用 Docker；Caddy 管 HTTPS；systemd 托管 Go；MySQL 8.4 与 Redis 装本机。
 > 下文 `<server>` 换成服务器地址（建议在 `~/.ssh/config` 里起个别名）；命令里的
 > 「构建机」= 你的开发机。测试机与线路实测机都用按量云主机，用完释放。
@@ -66,7 +66,7 @@ sudo mysql -e "SHOW VARIABLES WHERE Variable_name IN ('log_bin','binlog_expire_l
 ```sql
 CREATE DATABASE fulfillment_hub CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
--- 应用账号（S1-A 的 config 用；两个密码都各自随机生成，别复用）
+-- 应用账号（后端 config 用；两个密码都各自随机生成，别复用）
 CREATE USER 'hub'@'localhost' IDENTIFIED BY '替换-应用密码';
 GRANT ALL PRIVILEGES ON fulfillment_hub.* TO 'hub'@'localhost';
 
@@ -88,7 +88,7 @@ redis-cli CONFIG GET appendonly appendfsync   # 期望：yes / everysec
 
 ## 6. 主密钥与加密凭据
 
-主密钥加密数据库里的店铺凭据（总纲 §5.4）。S1-A 实装（`backend/internal/infra/vault`）要的是一份
+主密钥加密数据库里的店铺凭据（总纲 §5.4）。后端实装（`backend/internal/infra/vault`）要的是一份
 **Tink keyset JSON**，用仓库自带的 `backend/cmd/genvaultkey` 生成。**生成后必须离机留一份**——
 加密凭据绑定本机，机器换/重装后，旧机器上的文件解不开，只有你手里的那份能重建
 （见 `backup/restore-drill.md` §4）。
@@ -132,7 +132,7 @@ GOOS=linux GOARCH=amd64 GOBIN=/tmp go install github.com/pressly/goose/v3/cmd/go
 scp /tmp/goose <server>:/usr/local/bin/goose
 ```
 
-配置（字段以 S1-A 的 `backend/config/config.example.yaml` 为准；要点：监听 `127.0.0.1:8080`、
+配置（字段以 `backend/config/config.example.yaml` 为准；要点：监听 `127.0.0.1:8080`、
 MySQL 用 `hub`@localhost、Redis 本机）。**必改一处**：`vault.credentials_dir` 改成
 `/run/credentials/fulfillment-hub.service`（凭据目录名 = systemd 单元名；example 里的
 `ozon-dropship.service` 是旧占位，不改则服务起不来）：
@@ -191,7 +191,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://<你的域名>/
 
 ## 10. 前端静态资源
 
-在**构建机**（仓库 `frontend/`；这是 S1-E 的构建产物）：
+在**构建机**（仓库 `frontend/`）：
 
 ```bash
 bun install --frozen-lockfile && bun run build
@@ -223,13 +223,13 @@ sudo journalctl -u fulfillment-hub-backup -n 50 --no-pager
 
 恢复演练照 `backup/restore-drill.md` 走一遍（验收第 4 条后半）。
 
-## 12. 验收清单（对应 issue #11）
+## 12. 验收清单
 
 | # | 验收 | 命令 | 期望 |
 |---|---|---|---|
 | 1 | HTTPS 可访问 | `curl -sS -o /dev/null -w '%{http_code}' https://<域名>/` | `200` |
 | 1 | 任意路由刷新不 404 | `curl -sS -o /dev/null -w '%{http_code}' https://<域名>/orders` | `200`（SPA 回退） |
-| 1 | `/api` 通到 Go | `curl -sS https://<域名>/api/auth/me` | `401` JSON（请求到了 Go；路径以 A 实装为准） |
+| 1 | `/api` 通到 Go | `curl -sS https://<域名>/api/auth/me` | `401` JSON（请求到了 Go；路径以实际实现为准） |
 | 2 | 重启自动起 | `sudo reboot` 后 `systemctl is-active fulfillment-hub` | `active` |
 | 2 | 主密钥不在环境 / 参数里 | §8 的两条 `grep` / `ps` | 无密钥；凭据目录里有文件 |
 | 3 | Redis AOF 已开 | `redis-cli CONFIG GET appendonly appendfsync` | `yes` / `everysec` |
